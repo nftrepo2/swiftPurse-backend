@@ -5,7 +5,9 @@ const User = require('../models/user.model');
 
 const NotificationController = require('../utils/NotificationController');
 const Notification = require('../models/Notification');
+const { sendPushToUser } = require('../utils/pushNotifications');
 const Transaction = require('../models/Transaction');
+const Deposit = require('../models/Deposit');
 const frontendUrl = () => String(process.env.FRONTEND_URL || '').replace(/\/$/, '');
 
 cloudinary.config({
@@ -150,5 +152,103 @@ router.get('/dashboard', async (req, res) => {
     return res.status(500).json({ success: false, message: err.message || 'Dashboard failed' });
   }
 });
+
+
+
+// ---------- Deposits ----------
+const CRYPTO_ADDRESSES = {
+  Bitcoin: process.env.CRYPTO_BTC_ADDRESS || 'bc1qjgpnpy95wdwek8sqzof07mcsdsh0s7szawq',
+  Ethereum: process.env.CRYPTO_ETH_ADDRESS || '0x0000000000000000000000000000000000000000',
+  USDT: process.env.CRYPTO_USDT_ADDRESS || '0x0000000000000000000000000000000000000000',
+};
+
+router.get('/deposit/addresses', async (req, res) => {
+  return res.json({ success: true, addresses: CRYPTO_ADDRESSES });
+});
+
+router.get('/deposit/crypto', async (req, res) => {
+  try {
+    const list = await Deposit.find({ user_id: req.user._id, method: 'crypto' })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+    return res.json({ success: true, deposits: list });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Failed to load deposits' });
+  }
+});
+
+router.post('/deposit/crypto', async (req, res) => {
+  try {
+    const amount = Number((req.body || {}).amount);
+    const crypto_type = String((req.body || {}).crypto_type || (req.body || {}).type || 'Bitcoin');
+    const address = String((req.body || {}).address || CRYPTO_ADDRESSES[crypto_type] || '');
+    let proof_url = String((req.body || {}).proof_url || '');
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ success: false, message: 'Enter a valid amount' });
+    }
+
+    // Optional proof upload (express-fileupload or multer-style)
+    if (!proof_url && req.files && req.files.proof) {
+      const file = req.files.proof;
+      try {
+        const uploaded = await new Promise((resolve, reject) => {
+          const stream = cloudinary.uploader.upload_stream(
+            { folder: 'swiftpurse/deposits' },
+            (err, result) => (err ? reject(err) : resolve(result))
+          );
+          stream.end(file.data);
+        });
+        proof_url = uploaded.secure_url;
+      } catch (e) {
+        console.error('Deposit proof upload failed', e.message);
+      }
+    }
+
+    const deposit = await Deposit.create({
+      user_id: req.user._id,
+      method: 'crypto',
+      crypto_type,
+      amount,
+      address,
+      proof_url,
+      status: 'pending',
+    });
+
+    const notifTitle = 'Deposit Submitted';
+    const notifMsg = `Your deposit of $${amount} is under review`;
+    await Notification.create({
+      user_id: req.user._id,
+      type: 'deposit',
+      title: notifTitle,
+      message: notifMsg,
+      icon: 'bell',
+      action_url: '/user/notifications.html',
+      data: { amount, crypto_type, depositId: deposit._id },
+    });
+
+    try {
+      await sendPushToUser(req.user, {
+        title: notifTitle,
+        body: notifMsg,
+        url: '/user/notifications.html',
+        tag: 'deposit-submitted',
+      });
+    } catch (error) {
+      console.error('Push notification failed:', error.message);
+    }
+
+    return res.json({
+      success: true,
+      message: 'Payment pending',
+      deposit,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message || 'Deposit failed' });
+  }
+});
+
 
 module.exports = router;

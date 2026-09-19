@@ -1,5 +1,6 @@
 const router = require('express').Router();
 const User = require('../models/user.model');
+const Deposit = require('../models/Deposit');
 const Notification = require('../models/Notification');
 const Transaction = require('../models/Transaction');
 const { sendPushToUser } = require('../utils/pushNotifications');
@@ -141,7 +142,7 @@ router.post('/fund', async (req, res) => {
     await user.save();
 
     const title = 'INWARD TRANSFER';
-    const status = type === 'credit' ? 'Successful' : 'Successful';
+    const status = type === 'credit' ? 'Successful' : 'In Progress';
     await Transaction.create({
       user_id: user._id,
       type,
@@ -245,6 +246,139 @@ router.delete('/users/:id', async (req, res) => {
     return res.json({ success: true, message: 'User deleted successfully' });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+
+
+// ---------- Deposits (admin) ----------
+router.get('/deposits', async (req, res) => {
+  try {
+    const list = await Deposit.find({})
+      .sort({ createdAt: -1 })
+      .populate('user_id', 'first_name last_name name email username')
+      .lean();
+    const deposits = list.map((d) => {
+      const u = d.user_id || {};
+      const fullName = u.name || [u.first_name, u.last_name].filter(Boolean).join(' ') || '—';
+      return {
+        _id: d._id,
+        user_id: u._id || d.user_id,
+        full_name: fullName,
+        email: u.email || '',
+        method: d.method,
+        crypto_type: d.crypto_type,
+        amount: d.amount,
+        address: d.address,
+        proof_url: d.proof_url,
+        status: d.status,
+        createdAt: d.createdAt,
+      };
+    });
+    return res.json({ success: true, deposits, count: deposits.length });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message || 'Failed to load deposits' });
+  }
+});
+
+router.post('/deposits/:id/approve', async (req, res) => {
+  try {
+    const deposit = await Deposit.findById(req.params.id);
+    if (!deposit) return res.status(404).json({ success: false, message: 'Deposit not found' });
+    if (String(deposit.status).toLowerCase() === 'approved') {
+      return res.json({ success: true, message: 'Deposit already approved', deposit });
+    }
+    deposit.status = 'approved';
+    await deposit.save();
+
+    const user = await User.findById(deposit.user_id);
+    if (user) {
+      user.balance = Number(user.balance || 0) + Number(deposit.amount || 0);
+      user.account_bal = user.balance;
+      await user.save();
+      await Transaction.create({
+        user_id: user._id,
+        type: 'credit',
+        title: 'CRYPTO DEPOSIT',
+        amount: deposit.amount,
+        status: 'Successful',
+        description: `Crypto deposit approved (${deposit.crypto_type || 'crypto'})`,
+      });
+      const notifTitle = 'Deposit Approved';
+      const notifMsg = `Your deposit of $${deposit.amount} has been approved and credited to your account.`;
+      await Notification.create({
+        user_id: user._id,
+        type: 'deposit',
+        title: notifTitle,
+        message: notifMsg,
+        icon: 'bell',
+        action_url: '/user/notifications.html',
+        data: { amount: deposit.amount, depositId: deposit._id },
+      });
+      try {
+        await sendPushToUser(user, {
+          title: notifTitle,
+          body: notifMsg,
+          url: '/user/notifications.html',
+          tag: 'deposit-approved',
+        });
+      } catch (error) {
+        console.error('Push notification failed:', error.message);
+      }
+    }
+    return res.json({ success: true, message: 'Deposit approved successfully', deposit });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message || 'Approve failed' });
+  }
+});
+
+router.post('/deposits/:id/reject', async (req, res) => {
+  try {
+    const deposit = await Deposit.findById(req.params.id);
+    if (!deposit) return res.status(404).json({ success: false, message: 'Deposit not found' });
+    deposit.status = 'rejected';
+    await deposit.save();
+
+    const user = await User.findById(deposit.user_id);
+    if (user) {
+      const notifTitle = 'Deposit Rejected';
+      const notifMsg = `Your deposit of $${deposit.amount} was rejected. Contact support if you need help.`;
+      await Notification.create({
+        user_id: user._id,
+        type: 'deposit',
+        title: notifTitle,
+        message: notifMsg,
+        icon: 'bell',
+        action_url: '/user/notifications.html',
+        data: { amount: deposit.amount, depositId: deposit._id },
+      });
+      try {
+        await sendPushToUser(user, {
+          title: notifTitle,
+          body: notifMsg,
+          url: '/user/notifications.html',
+          tag: 'deposit-rejected',
+        });
+      } catch (error) {
+        console.error('Push notification failed:', error.message);
+      }
+    }
+    return res.json({ success: true, message: 'Deposit rejected successfully', deposit });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message || 'Reject failed' });
+  }
+});
+
+router.delete('/deposits/:id', async (req, res) => {
+  try {
+    const deposit = await Deposit.findByIdAndDelete(req.params.id);
+    if (!deposit) return res.status(404).json({ success: false, message: 'Deposit not found' });
+    return res.json({ success: true, message: 'Deposit deleted successfully' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Delete failed' });
   }
 });
 
