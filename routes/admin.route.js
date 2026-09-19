@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const User = require('../models/user.model');
 const Deposit = require('../models/Deposit');
+const Verify = require('../models/verifySchema');
 const Notification = require('../models/Notification');
 const Transaction = require('../models/Transaction');
 const { sendPushToUser } = require('../utils/pushNotifications');
@@ -377,6 +378,54 @@ router.delete('/deposits/:id', async (req, res) => {
     const deposit = await Deposit.findByIdAndDelete(req.params.id);
     if (!deposit) return res.status(404).json({ success: false, message: 'Deposit not found' });
     return res.json({ success: true, message: 'Deposit deleted successfully' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Delete failed' });
+  }
+});
+
+
+
+// ---------- Verifications (admin) ----------
+router.get('/verifications', async (req, res) => {
+  try {
+    const list = await Verify.find({})
+      .sort({ createdAt: -1 })
+      .populate('user user_id', 'first_name last_name name email username image phone country')
+      .lean();
+
+    const verifications = list.map((v) => {
+      const u = v.user || v.user_id || {};
+      const fullName = u.name || [u.first_name, u.last_name].filter(Boolean).join(' ') || '—';
+      const front = v.frontimg || v.idcardFront || '';
+      const back = v.backimg || v.idcardBack || '';
+      const photo = u.image || v.photo || '';
+      return {
+        _id: v._id,
+        user_id: u._id || v.user || v.user_id,
+        full_name: fullName,
+        email: u.email || '',
+        document_type: v.document_type || '',
+        status: v.status || 'pending',
+        frontimg: front,
+        backimg: back,
+        photo: photo,
+        message: v.message || '',
+        subject: v.subject || '',
+        createdAt: v.createdAt || v.submittedAt,
+      };
+    });
+    return res.json({ success: true, verifications, count: verifications.length });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message || 'Failed to load verifications' });
+  }
+});
+
+router.delete('/verifications/:id', async (req, res) => {
+  try {
+    const doc = await Verify.findByIdAndDelete(req.params.id);
+    if (!doc) return res.status(404).json({ success: false, message: 'Verification not found' });
+    return res.json({ success: true, message: 'Verification deleted successfully' });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message || 'Delete failed' });
   }
