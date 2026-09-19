@@ -206,18 +206,25 @@ router.post('/deposit/crypto', async (req, res) => {
       }
     }
 
+    const purpose = String((req.body || {}).purpose || 'deposit');
+    const plan = String((req.body || {}).plan || '');
+    const method = String((req.body || {}).method || 'crypto');
     const deposit = await Deposit.create({
       user_id: req.user._id,
-      method: 'crypto',
+      method,
       crypto_type,
       amount,
       address,
       proof_url,
+      purpose,
+      plan,
       status: 'pending',
     });
 
-    const notifTitle = 'Deposit Submitted';
-    const notifMsg = `Your deposit of $${amount} is under review`;
+    const notifTitle = purpose === 'upgrade' ? 'Upgrade Submitted' : 'Deposit Submitted';
+    const notifMsg = purpose === 'upgrade'
+      ? `Your upgrade payment of $${amount} is under review`
+      : `Your deposit of $${amount} is under review`;
     await Notification.create({
       user_id: req.user._id,
       type: 'deposit',
@@ -249,6 +256,5 @@ router.post('/deposit/crypto', async (req, res) => {
     return res.status(500).json({ success: false, message: err.message || 'Deposit failed' });
   }
 });
-
 
 module.exports = router;
