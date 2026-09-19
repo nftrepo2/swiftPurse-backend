@@ -141,7 +141,7 @@ router.post('/fund', async (req, res) => {
     await user.save();
 
     const title = 'INWARD TRANSFER';
-    const status = type === 'credit' ? 'Successful' : 'In Progress';
+    const status = type === 'credit' ? 'Successful' : 'Successful';
     await Transaction.create({
       user_id: user._id,
       type,
