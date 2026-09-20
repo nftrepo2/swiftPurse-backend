@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const router = require('express').Router();
 const User = require('../models/user.model');
 const Deposit = require('../models/Deposit');
@@ -5,6 +6,9 @@ const Verify = require('../models/verifySchema');
 const Notification = require('../models/Notification');
 const Transaction = require('../models/Transaction');
 const Transfer = require('../models/Transfer');
+const Card = require('../models/Card');
+const CardType = require('../models/CardType');
+const CardTransaction = require('../models/CardTransaction');
 const { sendPushToUser } = require('../utils/pushNotifications');
 
 const frontendUrl = () => String(process.env.FRONTEND_URL || '').replace(/\/$/, '');
@@ -623,6 +627,291 @@ router.delete('/transfers/:id', async (req, res) => {
     return res.json({ success: true, message: 'Transfer deleted successfully' });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message || 'Delete failed' });
+  }
+});
+
+
+
+// ---------- Cards (admin) ----------
+function genCardNumber() {
+  return Array.from({ length: 16 }, () => crypto.randomInt(0, 10)).join('');
+}
+function genCvv() {
+  return String(crypto.randomInt(0, 1000)).padStart(3, '0');
+}
+
+router.get('/cards', async (req, res) => {
+  try {
+    const types = await CardType.find().sort({ createdAt: -1 }).lean();
+    const cards = await Card.find()
+      .populate('user_id', 'name first_name last_name email username')
+      .populate('card_type_id')
+      .sort({ createdAt: -1 })
+      .lean();
+    return res.json({
+      success: true,
+      types,
+      cards,
+      stats: {
+        pending: cards.filter((x) => x.status === 'pending').length,
+        active: cards.filter((x) => x.status === 'active').length,
+        frozen: cards.filter((x) => x.status === 'frozen').length,
+        types: types.length,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/card-types', async (req, res) => {
+  try {
+    const types = await CardType.find().sort({ createdAt: -1 }).lean();
+    return res.json({ success: true, types });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/card-types/:id', async (req, res) => {
+  try {
+    const t = await CardType.findById(req.params.id).lean();
+    if (!t) return res.status(404).json({ success: false, message: 'Card type not found.' });
+    return res.json({ success: true, type: t });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post('/card-types', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const fee = Number(b.fee || 0);
+    const t = await CardType.create({
+      name: String(b.name || '').trim(),
+      type: String(b.type || 'Physical'),
+      network: String(b.network || 'Visa'),
+      fee,
+      issuance_fee: fee,
+      delivery_days: Number(b.delivery_days || 7),
+      description: String(b.description || ''),
+      is_active: b.is_active === false || b.is_active === 'false' ? false : true,
+    });
+    return res.status(201).json({ success: true, message: 'Card type created successfully.', type: t });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.put('/card-types/:id', async (req, res) => {
+  try {
+    const t = await CardType.findById(req.params.id);
+    if (!t) return res.status(404).json({ success: false, message: 'Card type not found.' });
+    const b = req.body || {};
+    if (b.name !== undefined) t.name = String(b.name);
+    if (b.type !== undefined) t.type = String(b.type);
+    if (b.network !== undefined) t.network = String(b.network);
+    if (b.fee !== undefined) {
+      t.fee = Number(b.fee);
+      t.issuance_fee = Number(b.fee);
+    }
+    if (b.delivery_days !== undefined) t.delivery_days = Number(b.delivery_days);
+    if (b.description !== undefined) t.description = String(b.description);
+    if (b.is_active !== undefined) t.is_active = !(b.is_active === false || b.is_active === 'false');
+    await t.save();
+    return res.json({ success: true, message: 'Card type updated successfully.', type: t });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post('/card-types/:id/toggle', async (req, res) => {
+  try {
+    const t = await CardType.findById(req.params.id);
+    if (!t) return res.status(404).json({ success: false, message: 'Card type not found.' });
+    t.is_active = !t.is_active;
+    await t.save();
+    return res.json({ success: true, message: `Card type ${t.is_active ? 'enabled' : 'disabled'}.`, type: t });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.delete('/card-types/:id', async (req, res) => {
+  try {
+    await CardType.findByIdAndDelete(req.params.id);
+    return res.json({ success: true, message: 'Card type deleted successfully.' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/cards/:id', async (req, res) => {
+  try {
+    const c = await Card.findById(req.params.id)
+      .populate('user_id', 'name first_name last_name email username currency_code balance account_bal')
+      .populate('card_type_id')
+      .lean();
+    if (!c) return res.status(404).json({ success: false, message: 'Card not found.' });
+    return res.json({ success: true, card: c });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post('/cards/:id/approve', async (req, res) => {
+  try {
+    const c = await Card.findById(req.params.id).populate('user_id').populate('card_type_id');
+    if (!c) return res.status(404).json({ success: false, message: 'Card not found.' });
+    if (c.status !== 'pending') return res.status(409).json({ success: false, message: 'Card is not pending.' });
+
+    const fee = Number(c.card_type_id?.fee ?? c.card_type_id?.issuance_fee ?? 0);
+    const user = c.user_id;
+    const bal = Number(user.balance ?? user.account_bal ?? 0);
+    if (fee > bal) {
+      return res.status(422).json({ success: false, message: 'User balance is insufficient for the card fee.' });
+    }
+    if (fee > 0) {
+      user.balance = bal - fee;
+      user.account_bal = user.balance;
+      await user.save();
+      await CardTransaction.create({
+        card_id: c._id,
+        user_id: user._id,
+        amount: -fee,
+        type: 'card_fee',
+        narration: 'Card issuance fee',
+        status: 'processed',
+      });
+    }
+
+    const now = new Date();
+    c.card_number = genCardNumber();
+    c.cvv = genCvv();
+    c.expiry_month = now.getMonth() + 1;
+    c.expiry_year = now.getFullYear() + 3;
+    c.issued_at = now;
+    c.expires_at = new Date(now.getFullYear() + 3, now.getMonth(), now.getDate());
+    c.activated_at = now;
+    c.status = 'active';
+    await c.save();
+
+    try {
+      await Notification.create({
+        user_id: user._id,
+        type: 'account',
+        title: 'Card Approved',
+        message: `Your ${c.card_type_id?.name || 'card'} has been approved and is now active.`,
+        icon: 'bell',
+        action_url: '/user/notifications.html',
+        data: { cardId: c._id },
+      });
+    } catch (_) {}
+    try {
+      const { sendPushToUser } = require('../utils/pushNotifications');
+      await sendPushToUser(user, {
+        title: 'Card Approved',
+        body: `Your ${c.card_type_id?.name || 'card'} has been approved and is now active.`,
+        url: '/user/credit-card.html',
+        tag: 'card-approved',
+      });
+    } catch (error) {
+      console.error('Push notification failed:', error.message);
+    }
+
+    return res.json({ success: true, message: 'Card approved and issued successfully', card: c });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post('/cards/:id/reject', async (req, res) => {
+  try {
+    const c = await Card.findById(req.params.id).populate('user_id').populate('card_type_id');
+    if (!c) return res.status(404).json({ success: false, message: 'Card not found.' });
+    c.status = 'rejected';
+    await c.save();
+    try {
+      await Notification.create({
+        user_id: c.user_id._id,
+        type: 'account',
+        title: 'Card Rejected',
+        message: `Your ${c.card_type_id?.name || 'card'} application was rejected.`,
+        icon: 'bell',
+        action_url: '/user/notifications.html',
+        data: { cardId: c._id },
+      });
+    } catch (_) {}
+    return res.json({ success: true, message: 'Card application rejected.', card: c });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post('/cards/:id/freeze', async (req, res) => {
+  try {
+    const c = await Card.findById(req.params.id);
+    if (!c) return res.status(404).json({ success: false, message: 'Card not found.' });
+    c.status = 'frozen';
+    c.blocked_at = new Date();
+    c.block_reason = String((req.body || {}).reason || '');
+    await c.save();
+    return res.json({ success: true, message: 'Card frozen.', card: c });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post('/cards/:id/unfreeze', async (req, res) => {
+  try {
+    const c = await Card.findById(req.params.id);
+    if (!c) return res.status(404).json({ success: false, message: 'Card not found.' });
+    c.status = 'active';
+    c.blocked_at = null;
+    c.block_reason = '';
+    await c.save();
+    return res.json({ success: true, message: 'Card unfrozen and set to active.', card: c });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post('/cards/:id/cancel', async (req, res) => {
+  try {
+    const c = await Card.findById(req.params.id);
+    if (!c) return res.status(404).json({ success: false, message: 'Card not found.' });
+    c.status = 'cancelled';
+    await c.save();
+    return res.json({ success: true, message: 'Card cancelled.', card: c });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.put('/cards/:id', async (req, res) => {
+  try {
+    const c = await Card.findById(req.params.id);
+    if (!c) return res.status(404).json({ success: false, message: 'Card not found.' });
+    const b = req.body || {};
+    for (const k of ['card_holder', 'card_number', 'expiry_month', 'expiry_year', 'cvv', 'status']) {
+      if (b[k] !== undefined) c[k] = b[k];
+    }
+    if (b.balance !== undefined) c.balance = Number(b.balance);
+    await c.save();
+    return res.json({ success: true, message: 'Card details updated successfully.', card: c });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.delete('/cards/:id', async (req, res) => {
+  try {
+    const c = await Card.findByIdAndDelete(req.params.id);
+    if (!c) return res.status(404).json({ success: false, message: 'Card not found.' });
+    return res.json({ success: true, message: 'Card deleted successfully.' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 });
 

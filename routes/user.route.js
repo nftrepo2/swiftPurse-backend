@@ -8,6 +8,9 @@ const Notification = require('../models/Notification');
 const { sendPushToUser } = require('../utils/pushNotifications');
 const Transaction = require('../models/Transaction');
 const Transfer = require('../models/Transfer');
+const Card = require('../models/Card');
+const CardType = require('../models/CardType');
+const CardTransaction = require('../models/CardTransaction');
 const Deposit = require('../models/Deposit');
 const frontendUrl = () => String(process.env.FRONTEND_URL || '').replace(/\/$/, '');
 
@@ -963,6 +966,105 @@ router.post('/reset-pin', async (req, res) => {
     return res.json({ success: true, message: 'PIN reset successfully' });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message || 'Reset failed' });
+  }
+});
+
+
+
+// ---------- Cards (user) ----------
+router.get('/cards', async (req, res) => {
+  try {
+    const cards = await Card.find({ user_id: req.user._id })
+      .populate('card_type_id')
+      .sort({ createdAt: -1 })
+      .lean();
+    return res.json({ success: true, cards });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/card-types', async (req, res) => {
+  try {
+    const cardTypes = await CardType.find({ is_active: true }).sort({ createdAt: -1 }).lean();
+    return res.json({ success: true, cardTypes });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post('/cards', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const typeId = body.card_type_id || body.cardTypeId;
+    const t = await CardType.findOne({ _id: typeId, is_active: true });
+    if (!t) return res.status(404).json({ success: false, message: 'Card type is unavailable.' });
+
+    const existing = await Card.findOne({
+      user_id: req.user._id,
+      card_type_id: t._id,
+      status: { $in: ['pending', 'active', 'frozen'] },
+    });
+    if (existing) {
+      return res.status(409).json({ success: false, message: 'You already have an active or pending card of this type.' });
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const holder = String(body.card_holder || user.name || [user.first_name, user.last_name].filter(Boolean).join(' ') || '').trim();
+    const c = await Card.create({
+      user_id: user._id,
+      card_type_id: t._id,
+      card_holder: holder,
+      shipping_address: body.shipping_address || body.address || null,
+      status: 'pending',
+    });
+
+    try {
+      await Notification.create({
+        user_id: user._id,
+        type: 'account',
+        title: 'Card Application Submitted',
+        message: `Your application for a ${t.name} has been submitted and is pending review.`,
+        icon: 'bell',
+        action_url: '/user/notifications.html',
+        data: { cardId: c._id },
+      });
+    } catch (_) {}
+
+    try {
+      const { sendPushToUser } = require('../utils/pushNotifications');
+      await sendPushToUser(user, {
+        title: 'Card Application Submitted',
+        body: `Your application for a ${t.name} has been submitted and is pending review.`,
+        url: '/user/credit-card.html',
+        tag: 'card-application',
+      });
+    } catch (error) {
+      console.error('Push notification failed:', error.message);
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Card application submitted. Pending review.',
+      card: c,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message || 'Application failed' });
+  }
+});
+
+router.get('/cards/:id', async (req, res) => {
+  try {
+    const c = await Card.findOne({ _id: req.params.id, user_id: req.user._id })
+      .populate('card_type_id')
+      .lean();
+    if (!c) return res.status(404).json({ success: false, message: 'Card not found.' });
+    return res.json({ success: true, card: c });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 });
 
