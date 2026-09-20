@@ -389,6 +389,7 @@ router.get('/me', requireAuth, async (req, res) => {
       account_verify: user.account_verify,
       balance: user.balance,
       account_no: user.account_no,
+      account_tier: user.account_tier || 'Tier 1',
       phone: user.phone,
       country: user.country,
     });

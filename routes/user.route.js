@@ -9,9 +9,12 @@ const { sendPushToUser } = require('../utils/pushNotifications');
 const Transaction = require('../models/Transaction');
 const Transfer = require('../models/Transfer');
 const Card = require('../models/Card');
+const Loan = require('../models/Loan');
+const LoanPlan = require('../models/LoanPlan');
 const CardType = require('../models/CardType');
 const CardTransaction = require('../models/CardTransaction');
 const Deposit = require('../models/Deposit');
+const CryptoWallet = require('../models/CryptoWallet');
 const frontendUrl = () => String(process.env.FRONTEND_URL || '').replace(/\/$/, '');
 
 const BIRD_API_KEY = process.env.BIRD_API_KEY || '';
@@ -253,7 +256,42 @@ const CRYPTO_ADDRESSES = {
 };
 
 router.get('/deposit/addresses', async (req, res) => {
-  return res.json({ success: true, addresses: CRYPTO_ADDRESSES });
+  try {
+    const wallets = await CryptoWallet.find({ is_active: true }).sort({ sort_order: 1, name: 1 }).lean();
+    if (wallets.length) {
+      const addresses = {};
+      const options = wallets.map((w) => {
+        addresses[w.name] = w.address;
+        return {
+          id: w._id,
+          name: w.name,
+          symbol: w.symbol || '',
+          network: w.network || '',
+          address: w.address,
+        };
+      });
+      return res.json({ success: true, addresses, options: options, wallets: options });
+    }
+    // fallback legacy env map
+    return res.json({
+      success: true,
+      addresses: CRYPTO_ADDRESSES,
+      options: Object.keys(CRYPTO_ADDRESSES).map((k) => ({
+        name: k,
+        symbol: k,
+        network: '',
+        address: CRYPTO_ADDRESSES[k],
+      })),
+      wallets: Object.keys(CRYPTO_ADDRESSES).map((k) => ({
+        name: k,
+        symbol: k,
+        network: '',
+        address: CRYPTO_ADDRESSES[k],
+      })),
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Failed to load wallets' });
+  }
 });
 
 router.get('/deposit/crypto', async (req, res) => {
@@ -272,7 +310,14 @@ router.post('/deposit/crypto', async (req, res) => {
   try {
     const amount = Number((req.body || {}).amount);
     const crypto_type = String((req.body || {}).crypto_type || (req.body || {}).type || 'Bitcoin');
-    const address = String((req.body || {}).address || CRYPTO_ADDRESSES[crypto_type] || '');
+    let address = String((req.body || {}).address || '').trim();
+    if (!address) {
+      try {
+        const w = await CryptoWallet.findOne({ name: crypto_type, is_active: true }).lean();
+        if (w) address = w.address;
+      } catch (_) {}
+    }
+    if (!address) address = String(CRYPTO_ADDRESSES[crypto_type] || '');
     let proof_url = String((req.body || {}).proof_url || '');
 
     if (!amount || amount <= 0) {
@@ -1065,6 +1110,301 @@ router.get('/cards/:id', async (req, res) => {
     return res.json({ success: true, card: c });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+
+function featureNum(v, fallback) {
+  const n = Number(v);
+  if (Number.isFinite(n)) return n;
+  return fallback !== undefined ? Number(fallback) || 0 : 0;
+}
+
+function loanBuildSchedule(amount, months, annualRate, interestType) {
+  const n = Math.max(1, Math.floor(months));
+  const principal = featureNum(amount);
+  const r = featureNum(annualRate) / 100;
+  const schedule = [];
+  let totalInterest = 0;
+  if (String(interestType).toLowerCase() === 'compound') {
+    const monthlyRate = r / 12;
+    const payment =
+      monthlyRate === 0
+        ? principal / n
+        : (principal * monthlyRate * Math.pow(1 + monthlyRate, n)) / (Math.pow(1 + monthlyRate, n) - 1);
+    let balance = principal;
+    for (let i = 1; i <= n; i++) {
+      const interest = balance * monthlyRate;
+      let prin = payment - interest;
+      if (i === n) prin = balance;
+      const total = prin + interest;
+      totalInterest += interest;
+      balance = Math.max(0, balance - prin);
+      const due = new Date();
+      due.setMonth(due.getMonth() + i);
+      schedule.push({
+        due_date: due,
+        principal: Math.round(prin * 100) / 100,
+        interest: Math.round(interest * 100) / 100,
+        total: Math.round(total * 100) / 100,
+        late_fee: 0,
+        status: 'upcoming',
+      });
+    }
+  } else {
+    const totalInterestAll = principal * r * (n / 12);
+    const interestPer = totalInterestAll / n;
+    const prinPer = principal / n;
+    totalInterest = totalInterestAll;
+    for (let i = 1; i <= n; i++) {
+      const due = new Date();
+      due.setMonth(due.getMonth() + i);
+      schedule.push({
+        due_date: due,
+        principal: Math.round(prinPer * 100) / 100,
+        interest: Math.round(interestPer * 100) / 100,
+        total: Math.round((prinPer + interestPer) * 100) / 100,
+        late_fee: 0,
+        status: 'upcoming',
+      });
+    }
+  }
+  const totalRepayable = schedule.reduce((s, x) => s + featureNum(x.total), 0);
+  return { schedule, totalInterest, totalRepayable };
+}
+
+
+// ---------- Loans (user) ----------
+router.get('/loan-plans', async (req, res) => {
+  try {
+    const plans = await LoanPlan.find({ is_active: true, status: 'Active' }).sort({ createdAt: -1 }).lean();
+    const u = await User.findById(req.user._id).lean();
+    const bal = featureNum(u && (u.balance ?? u.account_bal));
+    return res.json({ success: true, plans, balance: bal });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.post('/loans/preview', async (req, res) => {
+  try {
+    const plan = await LoanPlan.findById(req.body.plan_id).lean();
+    if (!plan) return res.status(404).json({ success: false, message: 'Plan not found.' });
+    const amount = featureNum(req.body.amount);
+    const months = featureNum(req.body.duration_months, plan.min_duration);
+    const fee = amount * (featureNum(plan.processing_fee) / 100);
+    const built = loanBuildSchedule(amount, months, plan.interest_rate, plan.interest_type);
+    const u = await User.findById(req.user._id).lean();
+    return res.json({
+      success: true,
+      preview: {
+        amount,
+        months,
+        fee: Math.round(fee * 100) / 100,
+        interest: Math.round(built.totalInterest * 100) / 100,
+        total_repayable: Math.round((built.totalRepayable + fee) * 100) / 100,
+        schedule: built.schedule,
+      },
+      balance: featureNum(u && (u.balance ?? u.account_bal)),
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.post('/loans/apply', async (req, res) => {
+  try {
+    const u = await User.findById(req.user._id);
+    if (!u) return res.status(401).json({ success: false, message: 'Authentication required.' });
+    const b = req.body || {};
+    const plan = await LoanPlan.findOne({ _id: b.plan_id, is_active: true, status: 'Active' });
+    if (!plan) return res.status(404).json({ success: false, message: 'Plan not found.' });
+    const amount = featureNum(b.amount);
+    const months = Math.floor(featureNum(b.duration_months, plan.min_duration));
+    if (amount < featureNum(plan.min_amount) || amount > featureNum(plan.max_amount)) {
+      return res.status(422).json({
+        success: false,
+        message: `Amount must be between $${featureNum(plan.min_amount)} and $${featureNum(plan.max_amount)}.`,
+      });
+    }
+    if (months < featureNum(plan.min_duration) || months > featureNum(plan.max_duration)) {
+      return res.status(422).json({
+        success: false,
+        message: `Duration must be between ${plan.min_duration} and ${plan.max_duration} months.`,
+      });
+    }
+    const bal = featureNum(u.balance ?? u.account_bal);
+    if (bal < featureNum(plan.min_account_balance)) {
+      return res.status(422).json({
+        success: false,
+        message: `Minimum account balance of $${featureNum(plan.min_account_balance)} required.`,
+      });
+    }
+    const activeCount = await Loan.countDocuments({
+      user_id: u._id,
+      plan_id: plan._id,
+      status: { $in: ['pending', 'active', 'repaying'] },
+    });
+    if (activeCount >= featureNum(plan.max_active_loans, 1)) {
+      return res.status(422).json({ success: false, message: 'Maximum active loans of this type reached.' });
+    }
+    const fee = Math.round(amount * (featureNum(plan.processing_fee) / 100) * 100) / 100;
+    const loan = await Loan.create({
+      user_id: u._id,
+      plan_id: plan._id,
+      amount,
+      duration_months: months,
+      purpose: String(b.purpose || '').trim(),
+      monthly_income: featureNum(b.monthly_income),
+      interest_rate: featureNum(plan.interest_rate),
+      interest_type: plan.interest_type,
+      processing_fee: fee,
+      status: 'pending',
+      applied_at: new Date(),
+    });
+    try {
+      await Notification.create({
+        user_id: u._id,
+        type: 'loan',
+        title: 'Loan Application Submitted',
+        message: `Your loan application for $${amount.toFixed(2)} is pending review.`,
+        icon: 'bell',
+        action_url: '/user/loan.html',
+        data: { loanId: loan._id },
+      });
+    } catch (_) {}
+    try {
+      const { sendPushToUser } = require('../utils/pushNotifications');
+      await sendPushToUser(u, {
+        title: 'Loan Application Submitted',
+        body: `Your loan application for $${amount.toFixed(2)} is pending review.`,
+        url: '/user/loan.html',
+        tag: 'loan-apply',
+      });
+    } catch (_) {}
+    return res.json({ success: true, message: 'Loan application submitted successfully.', loan });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.get('/loans', async (req, res) => {
+  try {
+    const loans = await Loan.find({ user_id: req.user._id }).populate('plan_id').sort({ createdAt: -1 }).lean();
+    const active = loans.filter((x) => ['active', 'repaying'].includes(x.status));
+    const pending = loans.filter((x) => x.status === 'pending');
+    const totalBorrowed = loans
+      .filter((x) => ['active', 'repaying', 'completed', 'defaulted'].includes(x.status))
+      .reduce((s, x) => s + featureNum(x.approved_amount || x.amount), 0);
+    const totalRepaid = loans.reduce((s, x) => s + featureNum(x.total_repaid), 0);
+    return res.json({
+      success: true,
+      loans,
+      stats: { active: active.length, pending: pending.length, totalBorrowed, totalRepaid },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.get('/loans/:id', async (req, res) => {
+  try {
+    const u = await User.findById(req.user._id);
+    const loan = await Loan.findOne({ _id: req.params.id, user_id: req.user._id }).populate('plan_id').lean();
+    if (!loan) return res.status(404).json({ success: false, message: 'Loan not found.' });
+    const now = Date.now();
+    if (Array.isArray(loan.schedule)) {
+      loan.schedule = loan.schedule.map((item) => {
+        if (item.status === 'upcoming' && item.due_date && new Date(item.due_date).getTime() < now) {
+          return { ...item, status: 'overdue' };
+        }
+        return item;
+      });
+    }
+    const total = featureNum(loan.total_repayable);
+    const paid = featureNum(loan.total_repaid);
+    const remaining = Math.max(0, total - paid);
+    const pct = total > 0 ? Math.min(100, (paid / total) * 100) : 0;
+    const next = (loan.schedule || []).find((x) => x.status === 'upcoming' || x.status === 'overdue');
+    return res.json({
+      success: true,
+      loan,
+      progress: { paid, remaining, total, pct },
+      nextPayment: next || null,
+      balance: featureNum(u && (u.balance ?? u.account_bal)),
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.post('/loans/:id/repay', async (req, res) => {
+  try {
+    const u = await User.findById(req.user._id);
+    if (!u) return res.status(401).json({ success: false, message: 'Authentication required.' });
+    const loan = await Loan.findOne({ _id: req.params.id, user_id: u._id });
+    if (!loan) return res.status(404).json({ success: false, message: 'Loan not found.' });
+    if (!['active', 'repaying'].includes(loan.status)) {
+      return res.status(422).json({ success: false, message: 'Loan is not repayable.' });
+    }
+    const scheduleId = req.body.schedule_id;
+    const amount = featureNum(req.body.amount);
+    let item = null;
+    let idx = -1;
+    if (scheduleId != null && scheduleId !== '') {
+      idx = loan.schedule.findIndex(
+        (s, i) =>
+          String(s._id) === String(scheduleId) ||
+          String(i + 1) === String(scheduleId) ||
+          String(i) === String(scheduleId)
+      );
+      if (idx >= 0) item = loan.schedule[idx];
+    }
+    if (!item) {
+      idx = loan.schedule.findIndex((s) => s.status === 'upcoming' || s.status === 'overdue');
+      if (idx >= 0) item = loan.schedule[idx];
+    }
+    if (!item) return res.status(422).json({ success: false, message: 'No payable installment found.' });
+    const due = amount > 0 ? amount : featureNum(item.total) + featureNum(item.late_fee);
+    if (due <= 0) return res.status(422).json({ success: false, message: 'Invalid amount.' });
+    const bal = featureNum(u.balance ?? u.account_bal);
+    if (bal < due) return res.status(422).json({ success: false, message: 'Insufficient account balance.' });
+    u.balance = bal - due;
+    u.account_bal = u.balance;
+    await u.save();
+    item.status = 'paid';
+    item.paid_at = new Date();
+    item.paid_amount = due;
+    loan.markModified('schedule');
+    loan.total_repaid = featureNum(loan.total_repaid) + due;
+    if (loan.status === 'active') loan.status = 'repaying';
+    if (loan.schedule.every((s) => s.status === 'paid')) loan.status = 'completed';
+    await loan.save();
+    try {
+      await Notification.create({
+        user_id: u._id,
+        type: 'loan',
+        title: 'Loan Repayment Recorded',
+        message: `Payment of $${due.toFixed(2)} recorded successfully.`,
+        icon: 'bell',
+        action_url: '/user/loan.html',
+        data: { loanId: loan._id },
+      });
+    } catch (_) {}
+    try {
+      const { sendPushToUser } = require('../utils/pushNotifications');
+      await sendPushToUser(u, {
+        title: 'Loan Repayment Recorded',
+        body: `Payment of $${due.toFixed(2)} recorded successfully.`,
+        url: '/user/loan.html',
+        tag: 'loan-repay',
+      });
+    } catch (_) {}
+    return res.json({ success: true, message: `Payment of $${due.toFixed(2)} recorded successfully.`, loan });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ success: false, message: e.message });
   }
 });
 

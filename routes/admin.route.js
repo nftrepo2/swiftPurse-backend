@@ -2,11 +2,14 @@ const crypto = require('crypto');
 const router = require('express').Router();
 const User = require('../models/user.model');
 const Deposit = require('../models/Deposit');
+const CryptoWallet = require('../models/CryptoWallet');
 const Verify = require('../models/verifySchema');
 const Notification = require('../models/Notification');
 const Transaction = require('../models/Transaction');
 const Transfer = require('../models/Transfer');
 const Card = require('../models/Card');
+const Loan = require('../models/Loan');
+const LoanPlan = require('../models/LoanPlan');
 const CardType = require('../models/CardType');
 const CardTransaction = require('../models/CardTransaction');
 const { sendPushToUser } = require('../utils/pushNotifications');
@@ -912,6 +915,334 @@ router.delete('/cards/:id', async (req, res) => {
     return res.json({ success: true, message: 'Card deleted successfully.' });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+
+function featureNum(v, fallback) {
+  const n = Number(v);
+  if (Number.isFinite(n)) return n;
+  return fallback !== undefined ? Number(fallback) || 0 : 0;
+}
+
+function loanBuildSchedule(amount, months, annualRate, interestType) {
+  const n = Math.max(1, Math.floor(months));
+  const principal = featureNum(amount);
+  const r = featureNum(annualRate) / 100;
+  const schedule = [];
+  let totalInterest = 0;
+  if (String(interestType).toLowerCase() === 'compound') {
+    const monthlyRate = r / 12;
+    const payment =
+      monthlyRate === 0
+        ? principal / n
+        : (principal * monthlyRate * Math.pow(1 + monthlyRate, n)) / (Math.pow(1 + monthlyRate, n) - 1);
+    let balance = principal;
+    for (let i = 1; i <= n; i++) {
+      const interest = balance * monthlyRate;
+      let prin = payment - interest;
+      if (i === n) prin = balance;
+      const total = prin + interest;
+      totalInterest += interest;
+      balance = Math.max(0, balance - prin);
+      const due = new Date();
+      due.setMonth(due.getMonth() + i);
+      schedule.push({
+        due_date: due,
+        principal: Math.round(prin * 100) / 100,
+        interest: Math.round(interest * 100) / 100,
+        total: Math.round(total * 100) / 100,
+        late_fee: 0,
+        status: 'upcoming',
+      });
+    }
+  } else {
+    const totalInterestAll = principal * r * (n / 12);
+    const interestPer = totalInterestAll / n;
+    const prinPer = principal / n;
+    totalInterest = totalInterestAll;
+    for (let i = 1; i <= n; i++) {
+      const due = new Date();
+      due.setMonth(due.getMonth() + i);
+      schedule.push({
+        due_date: due,
+        principal: Math.round(prinPer * 100) / 100,
+        interest: Math.round(interestPer * 100) / 100,
+        total: Math.round((prinPer + interestPer) * 100) / 100,
+        late_fee: 0,
+        status: 'upcoming',
+      });
+    }
+  }
+  const totalRepayable = schedule.reduce((s, x) => s + featureNum(x.total), 0);
+  return { schedule, totalInterest, totalRepayable };
+}
+
+
+// ---------- Loans (admin) ----------
+router.get('/loan-plans', async (req, res) => {
+  try {
+    const plans = await LoanPlan.find().sort({ createdAt: -1 }).lean();
+    return res.json({ success: true, plans });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.post('/loan-plans', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const plan = await LoanPlan.create({
+      name: String(b.name || '').trim(),
+      description: String(b.description || ''),
+      interest_rate: featureNum(b.interest_rate, 5),
+      interest_type: String(b.interest_type || 'simple').toLowerCase() === 'compound' ? 'compound' : 'simple',
+      processing_fee: featureNum(b.processing_fee),
+      min_amount: featureNum(b.min_amount, 100),
+      max_amount: featureNum(b.max_amount, 10000),
+      min_duration: featureNum(b.min_duration, 1),
+      max_duration: featureNum(b.max_duration, 36),
+      min_account_balance: featureNum(b.min_account_balance),
+      max_active_loans: featureNum(b.max_active_loans, 1),
+      status: 'Active',
+      is_active: b.is_active === false || b.is_active === 'false' ? false : true,
+    });
+    return res.status(201).json({ success: true, message: 'Loan plan created.', plan });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.put('/loan-plans/:id', async (req, res) => {
+  try {
+    const plan = await LoanPlan.findById(req.params.id);
+    if (!plan) return res.status(404).json({ success: false, message: 'Plan not found.' });
+    const b = req.body || {};
+    ['name', 'description', 'interest_type', 'status'].forEach((k) => {
+      if (b[k] !== undefined) plan[k] = b[k];
+    });
+    ['interest_rate', 'processing_fee', 'min_amount', 'max_amount', 'min_duration', 'max_duration', 'min_account_balance', 'max_active_loans'].forEach((k) => {
+      if (b[k] !== undefined) plan[k] = featureNum(b[k]);
+    });
+    if (b.is_active !== undefined) plan.is_active = !(b.is_active === false || b.is_active === 'false');
+    await plan.save();
+    return res.json({ success: true, message: 'Plan updated.', plan });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.post('/loan-plans/:id/toggle', async (req, res) => {
+  try {
+    const plan = await LoanPlan.findById(req.params.id);
+    if (!plan) return res.status(404).json({ success: false, message: 'Plan not found.' });
+    plan.is_active = !plan.is_active;
+    plan.status = plan.is_active ? 'Active' : 'Inactive';
+    await plan.save();
+    return res.json({ success: true, message: `Plan ${plan.is_active ? 'enabled' : 'disabled'}.`, plan });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.delete('/loan-plans/:id', async (req, res) => {
+  try {
+    await LoanPlan.findByIdAndDelete(req.params.id);
+    return res.json({ success: true, message: 'Plan deleted.' });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.get('/loans', async (req, res) => {
+  try {
+    const plans = await LoanPlan.find().sort({ createdAt: -1 }).lean();
+    const loans = await Loan.find()
+      .populate('user_id', 'name first_name last_name email username')
+      .populate('plan_id')
+      .sort({ createdAt: -1 })
+      .lean();
+    return res.json({
+      success: true,
+      plans,
+      loans,
+      stats: {
+        pending: loans.filter((x) => x.status === 'pending').length,
+        active: loans.filter((x) => ['active', 'repaying'].includes(x.status)).length,
+        completed: loans.filter((x) => x.status === 'completed').length,
+        plans: plans.length,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.post('/loans/:id/approve', async (req, res) => {
+  try {
+    const loan = await Loan.findById(req.params.id).populate('user_id').populate('plan_id');
+    if (!loan) return res.status(404).json({ success: false, message: 'Loan not found.' });
+    if (loan.status !== 'pending') return res.status(409).json({ success: false, message: 'Loan is not pending.' });
+    const user = loan.user_id;
+    const amount = featureNum(loan.amount);
+    const months = featureNum(loan.duration_months);
+    const built = loanBuildSchedule(amount, months, loan.interest_rate, loan.interest_type);
+    const fee = featureNum(loan.processing_fee);
+    loan.approved_amount = amount;
+    loan.total_interest = Math.round(built.totalInterest * 100) / 100;
+    loan.total_repayable = Math.round((built.totalRepayable + fee) * 100) / 100;
+    loan.schedule = built.schedule;
+    loan.status = 'active';
+    loan.approved_at = new Date();
+    await loan.save();
+
+    // Credit principal to user balance
+    const bal = featureNum(user.balance ?? user.account_bal);
+    user.balance = bal + amount;
+    user.account_bal = user.balance;
+    await user.save();
+
+    try {
+      const Transaction = require('../models/Transaction');
+      await Transaction.create({
+        user_id: user._id,
+        type: 'credit',
+        title: 'Loan Disbursement',
+        amount: amount,
+        currency: '$',
+        status: 'Successful',
+        description: `Loan approved and disbursed (${loan.plan_id && loan.plan_id.name ? loan.plan_id.name : 'Loan'})`,
+        meta: { loan_id: String(loan._id), source: 'loan-approve' },
+      });
+    } catch (txErr) {
+      console.error('loan transaction create failed:', txErr.message);
+    }
+
+    try {
+      await Notification.create({
+        user_id: user._id,
+        type: 'loan',
+        title: 'Loan Approved',
+        message: `Your loan of $${amount.toFixed(2)} has been approved and credited to your account.`,
+        icon: 'bell',
+        action_url: '/user/loan.html',
+        data: { loanId: loan._id },
+      });
+    } catch (_) {}
+    try {
+      const { sendPushToUser } = require('../utils/pushNotifications');
+      await sendPushToUser(user, {
+        title: 'Loan Approved',
+        body: `Your loan of $${amount.toFixed(2)} has been approved and credited.`,
+        url: '/user/loan.html',
+        tag: 'loan-approved',
+      });
+    } catch (_) {}
+    return res.json({ success: true, message: 'Loan approved and funded.', loan });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.post('/loans/:id/reject', async (req, res) => {
+  try {
+    const loan = await Loan.findById(req.params.id).populate('user_id').populate('plan_id');
+    if (!loan) return res.status(404).json({ success: false, message: 'Loan not found.' });
+    loan.status = 'rejected';
+    loan.rejected_at = new Date();
+    loan.reject_reason = String((req.body || {}).reason || '');
+    await loan.save();
+    try {
+      await Notification.create({
+        user_id: loan.user_id._id,
+        type: 'loan',
+        title: 'Loan Rejected',
+        message: `Your loan application for $${featureNum(loan.amount).toFixed(2)} was rejected.`,
+        icon: 'bell',
+        action_url: '/user/loan.html',
+        data: { loanId: loan._id },
+      });
+    } catch (_) {}
+    return res.json({ success: true, message: 'Loan application rejected.', loan });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.delete('/loans/:id', async (req, res) => {
+  try {
+    const loan = await Loan.findByIdAndDelete(req.params.id);
+    if (!loan) return res.status(404).json({ success: false, message: 'Loan not found.' });
+    return res.json({ success: true, message: 'Loan deleted.' });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+
+// ---------- Crypto wallets (admin) ----------
+router.get('/wallets', async (req, res) => {
+  try {
+    const wallets = await CryptoWallet.find().sort({ sort_order: 1, name: 1 }).lean();
+    return res.json({ success: true, wallets });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.post('/wallets', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const w = await CryptoWallet.create({
+      name: String(b.name || '').trim(),
+      symbol: String(b.symbol || b.name || '').trim(),
+      network: String(b.network || '').trim(),
+      address: String(b.address || '').trim(),
+      is_active: b.is_active === false || b.is_active === 'false' ? false : true,
+      sort_order: Number(b.sort_order || 0),
+    });
+    return res.status(201).json({ success: true, message: 'Wallet created', wallet: w });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.put('/wallets/:id', async (req, res) => {
+  try {
+    const w = await CryptoWallet.findById(req.params.id);
+    if (!w) return res.status(404).json({ success: false, message: 'Wallet not found' });
+    const b = req.body || {};
+    ['name', 'symbol', 'network', 'address'].forEach((k) => {
+      if (b[k] !== undefined) w[k] = String(b[k]).trim();
+    });
+    if (b.is_active !== undefined) w.is_active = !(b.is_active === false || b.is_active === 'false');
+    if (b.sort_order !== undefined) w.sort_order = Number(b.sort_order);
+    await w.save();
+    return res.json({ success: true, message: 'Wallet updated', wallet: w });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.post('/wallets/:id/toggle', async (req, res) => {
+  try {
+    const w = await CryptoWallet.findById(req.params.id);
+    if (!w) return res.status(404).json({ success: false, message: 'Wallet not found' });
+    w.is_active = !w.is_active;
+    await w.save();
+    return res.json({ success: true, message: w.is_active ? 'Wallet enabled' : 'Wallet disabled', wallet: w });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+router.delete('/wallets/:id', async (req, res) => {
+  try {
+    await CryptoWallet.findByIdAndDelete(req.params.id);
+    return res.json({ success: true, message: 'Wallet deleted' });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
   }
 });
 
