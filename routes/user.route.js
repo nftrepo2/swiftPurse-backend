@@ -799,4 +799,171 @@ router.post('/profile/photo', async (req, res) => {
   }
 });
 
+
+
+// ---------- Settings (email / passcode / pin) ----------
+const pinResetStore = new Map();
+
+function pinResetEmailHtml(resetLink) {
+  return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#eff1ff;font-family:Arial,Helvetica,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#eff1ff;padding:24px 12px">
+<tr><td align="center">
+<table width="590" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden">
+<tr><td style="padding:28px 24px;text-align:center;background:#eff1ff">
+<img src="https://swiftpursebank.com/i/logo.png" alt="SwiftPurse Bank" width="180">
+</td></tr>
+<tr><td style="padding:20px 30px">
+<p style="font-size:18px">Hi there,</p>
+<p style="font-size:16px;line-height:1.5">We received a request to reset your PIN. If you initiated this request, please click the link below to proceed:</p>
+<p style="text-align:center;margin:28px 0">
+<a href="${resetLink}" style="display:inline-block;background:#19202F;color:#fff;text-decoration:none;padding:14px 28px;border-radius:999px;font-weight:700">Reset Your PIN</a>
+</p>
+<p style="font-size:14px;color:#666">For security purposes, this link will expire in 5 minutes and can only be used once. If you did not request a PIN reset, please disregard this email or contact our support team immediately.</p>
+<p style="font-size:16px">Best Regards,<br><br>The SwiftPurse Bank Team</p>
+</td></tr>
+<tr><td style="padding:20px 30px;border-top:1px solid #e3e3e3;color:#979797;font-size:12px">
+<p>2026 SwiftPurse Bank. All rights reserved.</p>
+<p>UK banking services offered by SwiftPurse Bank (RC796975) with registered address at Head office: 21 Lombard St, city of london,London Ec3v 9AH , UK. Clients' money is safeguarded with reputable UK and EU banks. Financial Services Compensation Scheme (FSCS) does not apply.</p>
+</td></tr>
+</table>
+</td></tr></table></body></html>`;
+}
+
+router.post('/settings/email', async (req, res) => {
+  try {
+    const email = String((req.body || {}).email || '').trim().toLowerCase();
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ success: false, message: 'Enter a valid email address' });
+    }
+    const exists = await User.findOne({ email, _id: { $ne: req.user._id } });
+    if (exists) return res.status(409).json({ success: false, message: 'Email already in use' });
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    user.email = email;
+    await user.save();
+    return res.json({ success: true, message: 'Email updated successfully', email: user.email });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Update failed' });
+  }
+});
+
+router.post('/settings/passcode', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const current = String(body.current_passcode || body.current || '').trim();
+    const next = String(body.new_passcode || body.password || '').trim();
+    const confirm = String(body.confirm_passcode || body.confirm || '').trim();
+    if (!current || !next || !confirm) {
+      return res.status(400).json({ success: false, message: 'All passcode fields are required' });
+    }
+    if (next.length < 6) {
+      return res.status(400).json({ success: false, message: 'New passcode must be at least 6 characters' });
+    }
+    if (next !== confirm) {
+      return res.status(400).json({ success: false, message: 'Passcodes do not match' });
+    }
+    const user = await User.findById(req.user._id).select('+password');
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    const ok = await user.comparePassword(current);
+    if (!ok) return res.status(400).json({ success: false, message: 'Current passcode is incorrect' });
+    user.password = next;
+    await user.save();
+    return res.json({ success: true, message: 'Passcode updated successfully' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Update failed' });
+  }
+});
+
+router.post('/settings/pin', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const current = String(body.current_pin || '').trim();
+    const next = String(body.new_pin || '').trim();
+    const confirm = String(body.confirm_pin || '').trim();
+    if (!/^\d{4}$/.test(next)) {
+      return res.status(400).json({ success: false, message: 'New PIN must be 4 digits' });
+    }
+    if (next !== confirm) {
+      return res.status(400).json({ success: false, message: 'PINs do not match' });
+    }
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    const stored = String(user.pin || user.transaction_pin || '').trim();
+    if (stored && stored !== current) {
+      return res.status(400).json({ success: false, message: 'Current PIN is incorrect' });
+    }
+    user.pin = next;
+    user.transaction_pin = next;
+    await user.save();
+    return res.json({ success: true, message: 'PIN updated successfully' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Update failed' });
+  }
+});
+
+router.post('/settings/reset-pin', async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    const crypto = require('crypto');
+    const token = crypto.randomBytes(24).toString('hex');
+    const expires = Date.now() + 5 * 60 * 1000;
+    pinResetStore.set(token, { userId: String(user._id), email: user.email, expires });
+    user.pinResetToken = token;
+    user.pinResetExpires = new Date(expires);
+    await user.save({ validateBeforeSave: false });
+
+    const link = `${frontendUrl()}/user/resetpin.html?token=${token}&email=${encodeURIComponent(user.email)}`;
+    try {
+      await sendMail(user.email, 'Reset Your PIN – SwiftPurse Bank', pinResetEmailHtml(link));
+    } catch (e) {
+      console.error('PIN reset email failed:', e.message);
+    }
+    return res.json({ success: true, message: 'PIN reset link sent to your email' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Request failed' });
+  }
+});
+
+// Public: complete PIN reset via email link (no session required)
+router.post('/reset-pin', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const token = String(body.token || '').trim();
+    const email = String(body.email || '').trim().toLowerCase();
+    const pin = String(body.pin || body.new_pin || '').trim();
+    const confirm = String(body.confirm_pin || body.confirm || pin).trim();
+    if (!token) return res.status(400).json({ success: false, message: 'Invalid or missing reset token' });
+    if (!/^\d{4}$/.test(pin)) return res.status(400).json({ success: false, message: 'PIN must be 4 digits' });
+    if (pin !== confirm) return res.status(400).json({ success: false, message: 'PINs do not match' });
+
+    let user = null;
+    const mem = pinResetStore.get(token);
+    if (mem && Date.now() <= mem.expires) {
+      user = await User.findById(mem.userId);
+    }
+    if (!user) {
+      user = await User.findOne({
+        email: email || undefined,
+        pinResetToken: token,
+        pinResetExpires: { $gt: new Date() },
+      });
+    }
+    if (!user && email) {
+      user = await User.findOne({ email, pinResetToken: token, pinResetExpires: { $gt: new Date() } });
+    }
+    if (!user) return res.status(400).json({ success: false, message: 'Invalid or expired reset link' });
+
+    user.pin = pin;
+    user.transaction_pin = pin;
+    user.pinResetToken = undefined;
+    user.pinResetExpires = undefined;
+    await user.save();
+    pinResetStore.delete(token);
+    return res.json({ success: true, message: 'PIN reset successfully' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Reset failed' });
+  }
+});
+
 module.exports = router;

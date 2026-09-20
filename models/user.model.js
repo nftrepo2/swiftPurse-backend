@@ -84,6 +84,8 @@ const userSchema = new mongoose.Schema(
     next_of_kin: { type: String, default: '' },
     resetPasswordToken: { type: String, select: false },
     resetPasswordExpires: { type: Date, select: false },
+    pinResetToken: { type: String, select: false },
+    pinResetExpires: { type: Date, select: false },
     pushSubscription: { type: mongoose.Schema.Types.Mixed, default: null },
     pushSubscriptions: { type: [mongoose.Schema.Types.Mixed], default: [] },
     isBlocked: { type: Boolean, default: false },
