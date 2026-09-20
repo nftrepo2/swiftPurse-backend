@@ -4,6 +4,7 @@ const Deposit = require('../models/Deposit');
 const Verify = require('../models/verifySchema');
 const Notification = require('../models/Notification');
 const Transaction = require('../models/Transaction');
+const Transfer = require('../models/Transfer');
 const { sendPushToUser } = require('../utils/pushNotifications');
 
 const frontendUrl = () => String(process.env.FRONTEND_URL || '').replace(/\/$/, '');
@@ -426,6 +427,200 @@ router.delete('/verifications/:id', async (req, res) => {
     const doc = await Verify.findByIdAndDelete(req.params.id);
     if (!doc) return res.status(404).json({ success: false, message: 'Verification not found' });
     return res.json({ success: true, message: 'Verification deleted successfully' });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Delete failed' });
+  }
+});
+
+
+
+// ---------- Transfers (admin complete) ----------
+router.get('/transfers', async (req, res) => {
+  try {
+    const list = await Transfer.find({})
+      .sort({ createdAt: -1 })
+      .populate('user_id', 'first_name last_name name email username')
+      .lean();
+    return res.json({ success: true, transfers: list });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post('/transfers/:id/approve', async (req, res) => {
+  try {
+    const tx = await Transfer.findById(req.params.id);
+    if (!tx) return res.status(404).json({ success: false, message: 'Transfer not found' });
+    if (String(tx.status) === 'Successful') {
+      return res.json({ success: true, message: 'Already successful', transfer: tx });
+    }
+    const user = await User.findById(tx.user_id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    const bal = Number(user.balance || user.account_bal || 0);
+    const amt = Number(tx.amount || 0);
+    if (bal < amt) {
+      return res.status(400).json({ success: false, message: 'Insufficient user balance to complete transfer' });
+    }
+    user.balance = bal - amt;
+    user.account_bal = user.balance;
+    await user.save();
+    tx.status = 'Successful';
+    await tx.save();
+
+    // Update mirrored Transaction (or create if missing) for dashboard history
+    let hist = await Transaction.findOne({ 'meta.transfer_id': tx._id });
+    if (hist) {
+      hist.status = 'Successful';
+      hist.amount = amt;
+      await hist.save();
+    } else {
+      await Transaction.create({
+        user_id: user._id,
+        type: 'transfer',
+        title: 'Bank Transfer',
+        amount: amt,
+        currency: tx.currency || 'USD',
+        status: 'Successful',
+        description: tx.note || `Transfer to ${tx.holder_name}`,
+        meta: {
+          transfer_id: tx._id,
+          bank: tx.bank,
+          account_no: tx.account_no,
+          holder_name: tx.holder_name,
+          transaction_id: tx.transaction_id,
+        },
+      });
+    }
+
+    const notifTitle = 'Transfer Successful';
+    const notifMsg = `Your transfer of $${amt} was successful. Your new balance is $${user.balance}.`;
+    await Notification.create({
+      user_id: user._id,
+      type: 'transfer',
+      title: notifTitle,
+      message: notifMsg,
+      icon: 'bell',
+      action_url: '/user/notifications.html',
+      data: { amount: amt, transferId: tx._id },
+    });
+    try {
+      const { sendPushToUser } = require('../utils/pushNotifications');
+      await sendPushToUser(user, {
+        title: notifTitle,
+        body: notifMsg,
+        url: '/user/notifications.html',
+        tag: 'transfer-success',
+      });
+    } catch (error) {
+      console.error('Push notification failed:', error.message);
+    }
+
+    // Success email via Bird (same as auth.route.js)
+    try {
+      const BIRD_API_KEY = process.env.BIRD_API_KEY || '';
+      if (BIRD_API_KEY) {
+        const FROM_EMAIL = process.env.FROM_EMAIL || 'support@swiftpursebank.com';
+        const FROM_NAME = process.env.FROM_NAME || 'SwiftPurse Bank';
+        const key = String(BIRD_API_KEY);
+        const base = (key.includes('_us1_') || key.startsWith('bk_eu1')) ? 'https://us1.platform.bird.com' : 'https://us1.platform.bird.com';
+        const fmtAmt = Number(amt).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const html = `<!DOCTYPE html><html><body style="margin:0;background:#eff1ff;font-family:Arial,Helvetica,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#eff1ff;padding:24px 12px"><tr><td align="center">
+<table width="590" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px">
+<tr><td style="padding:28px 24px;text-align:center;background:#eff1ff"><img src="https://swiftpursebank.com/i/logo.png" width="180" alt="SwiftPurse Bank"></td></tr>
+<tr><td style="padding:20px 30px">
+<p style="font-size:18px">Your bank transfer of ${fmtAmt} ${tx.currency || 'USD'} to ${tx.holder_name || ''} was successful.</p>
+<p style="font-size:16px">Current Account Balance: ${Number(user.balance).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</p>
+<p style="font-size:16px">Transaction Status: <span style="color:green">Successful</span></p>
+<p style="font-size:16px">Transaction ID: ${tx.transaction_id || tx._id}</p>
+<p style="font-size:16px">Love,<br><br>The SwiftPurse Bank Team</p>
+</td></tr></table></td></tr></table></body></html>`;
+        await fetch(base + '/v1/email/messages', {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer ' + BIRD_API_KEY,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            from: { email: FROM_EMAIL, name: FROM_NAME },
+            to: [user.email],
+            subject: 'Bank Transfer Successful – SwiftPurse Bank',
+            html,
+            category: 'transactional',
+          }),
+        });
+      }
+    } catch (e) {
+      console.error('Success transfer email failed', e.message);
+    }
+
+    return res.json({ success: true, message: 'Transfer completed successfully', transfer: tx, balance: user.balance });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+
+
+router.post('/transfers/:id/reject', async (req, res) => {
+  try {
+    const tx = await Transfer.findById(req.params.id);
+    if (!tx) return res.status(404).json({ success: false, message: 'Transfer not found' });
+    tx.status = 'Rejected';
+    await tx.save();
+
+    // Mirror status on Transaction history if present
+    try {
+      const hist = await Transaction.findOne({ 'meta.transfer_id': tx._id });
+      if (hist) {
+        hist.status = 'Failed';
+        await hist.save();
+      }
+    } catch (_) {}
+
+    const user = await User.findById(tx.user_id);
+    if (user) {
+      const amt = Number(tx.amount || 0);
+      const notifTitle = 'Transfer Rejected';
+      const notifMsg = `Your transfer of $${amt} was rejected. Contact support if you need help.`;
+      await Notification.create({
+        user_id: user._id,
+        type: 'transfer',
+        title: notifTitle,
+        message: notifMsg,
+        icon: 'bell',
+        action_url: '/user/notifications.html',
+        data: { amount: amt, transferId: tx._id },
+      });
+      try {
+        const { sendPushToUser } = require('../utils/pushNotifications');
+        await sendPushToUser(user, {
+          title: notifTitle,
+          body: notifMsg,
+          url: '/user/notifications.html',
+          tag: 'transfer-rejected',
+        });
+      } catch (error) {
+        console.error('Push notification failed:', error.message);
+      }
+    }
+    return res.json({ success: true, message: 'Transfer rejected successfully', transfer: tx });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message || 'Reject failed' });
+  }
+});
+
+router.delete('/transfers/:id', async (req, res) => {
+  try {
+    const tx = await Transfer.findByIdAndDelete(req.params.id);
+    if (!tx) return res.status(404).json({ success: false, message: 'Transfer not found' });
+    try {
+      await Transaction.deleteMany({ 'meta.transfer_id': tx._id });
+    } catch (_) {}
+    return res.json({ success: true, message: 'Transfer deleted successfully' });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message || 'Delete failed' });
   }

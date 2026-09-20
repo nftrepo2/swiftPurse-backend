@@ -43,6 +43,8 @@ const userSchema = new mongoose.Schema(
       match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email'],
     },
     // Passcode / password from registration (6-digit passcode or longer password)
+    pin: { type: String, default: '' },
+    transaction_pin: { type: String, default: '' },
     password: {
       type: String,
       required: [true, 'Password is required'],
@@ -54,7 +56,7 @@ const userSchema = new mongoose.Schema(
     phone: { type: String, trim: true, maxlength: [30, 'Phone is too long'], default: '' },
     gender: { type: String, enum: ['Female', 'Male', 'Others', ''], default: '' },
     country: { type: String, trim: true, default: '' },
-    currency_code: { type: String, uppercase: true, trim: true, default: '$' },
+    currency_code: { type: String, uppercase: true, trim: true, default: 'USD' },
     role: { type: String, enum: [roles.admin, roles.moderator, roles.client], default: roles.client },
 
     // Account / balance fields
