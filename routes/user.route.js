@@ -555,4 +555,248 @@ router.post('/transfer', async (req, res) => {
   }
 });
 
+
+
+// ---------- Statements & receipt ----------
+router.get('/statements', async (req, res) => {
+  try {
+    const [txs, transfers] = await Promise.all([
+      Transaction.find({ user_id: req.user._id }).sort({ createdAt: -1 }).limit(100).lean(),
+      Transfer.find({ user_id: req.user._id }).sort({ createdAt: -1 }).limit(100).lean(),
+    ]);
+
+    // Prefer transfer records for bank transfers (avoid duplicates from mirrored Transaction)
+    const transferIds = new Set(
+      transfers.map((t) => String(t._id))
+    );
+    const items = [];
+
+    transfers.forEach((t) => {
+      items.push({
+        id: String(t._id),
+        source: 'transfer',
+        title: 'Bank Transfer',
+        type: 'transfer',
+        amount: Number(t.amount || 0),
+        currency: t.currency || 'USD',
+        status: t.status || 'In Progress',
+        createdAt: t.createdAt,
+        bank: t.bank || '',
+        holder_name: t.holder_name || '',
+        account_no: t.account_no || '',
+        country: t.country || '',
+        transaction_id: t.transaction_id || String(t._id),
+        payment_method: t.payment_method || 'Bank Transfer',
+        is_debit: true,
+      });
+    });
+
+    txs.forEach((t) => {
+      const meta = t.meta || {};
+      if (meta.transfer_id && transferIds.has(String(meta.transfer_id))) return; // skip mirror
+      const isDebit = t.type === 'transfer' || t.type === 'debit' || t.type === 'withdrawal';
+      items.push({
+        id: String(t._id),
+        source: 'transaction',
+        title: t.title || (isDebit ? 'Bank Transfer' : 'INWARD TRANSFER'),
+        type: t.type || 'credit',
+        amount: Number(t.amount || 0),
+        currency: t.currency || 'USD',
+        status: t.status || 'Successful',
+        createdAt: t.createdAt,
+        bank: meta.bank || '',
+        holder_name: meta.holder_name || meta.holder || '',
+        account_no: meta.account_no || '',
+        country: meta.country || '',
+        transaction_id: meta.transaction_id || meta.txId || String(t._id),
+        payment_method: meta.payment_method || (isDebit ? 'Bank Transfer' : 'Inward Transfer'),
+        is_debit: isDebit,
+      });
+    });
+
+    items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    return res.json({ success: true, statements: items });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/statements/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    let item = null;
+
+    const transfer = await Transfer.findOne({ _id: id, user_id: req.user._id }).lean();
+    if (transfer) {
+      item = {
+        id: String(transfer._id),
+        source: 'transfer',
+        title: 'Bank Transfer',
+        type: 'transfer',
+        amount: Number(transfer.amount || 0),
+        currency: transfer.currency || 'USD',
+        status: transfer.status || 'In Progress',
+        createdAt: transfer.createdAt,
+        bank: transfer.bank || '',
+        holder_name: transfer.holder_name || '',
+        account_no: transfer.account_no || '',
+        country: transfer.country || '',
+        transaction_id: transfer.transaction_id || String(transfer._id),
+        payment_method: transfer.payment_method || 'Bank Transfer',
+        is_debit: true,
+      };
+    } else {
+      const tx = await Transaction.findOne({ _id: id, user_id: req.user._id }).lean();
+      if (!tx) return res.status(404).json({ success: false, message: 'Statement not found' });
+      const meta = tx.meta || {};
+      const isDebit = tx.type === 'transfer' || tx.type === 'debit' || tx.type === 'withdrawal';
+      item = {
+        id: String(tx._id),
+        source: 'transaction',
+        title: tx.title || (isDebit ? 'Bank Transfer' : 'INWARD TRANSFER'),
+        type: tx.type || 'credit',
+        amount: Number(tx.amount || 0),
+        currency: tx.currency || 'USD',
+        status: tx.status || 'Successful',
+        createdAt: tx.createdAt,
+        bank: meta.bank || '',
+        holder_name: meta.holder_name || meta.holder || '',
+        account_no: meta.account_no || '',
+        country: meta.country || '',
+        transaction_id: meta.transaction_id || meta.txId || String(tx._id),
+        payment_method: meta.payment_method || (isDebit ? 'Bank Transfer' : 'Inward Transfer'),
+        is_debit: isDebit,
+      };
+    }
+    return res.json({ success: true, statement: item });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+
+
+// ---------- Profile ----------
+router.get('/profile', async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    return res.json({
+      success: true,
+      user: {
+        _id: user._id,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        name: user.name,
+        username: user.username,
+        email: user.email,
+        phone: user.phone || '',
+        gender: user.gender || '',
+        country: user.country || '',
+        dob: user.dob || '',
+        marital_status: user.marital_status || '',
+        home_address: user.home_address || '',
+        next_of_kin: user.next_of_kin || '',
+        account_no: user.account_no || '',
+        image: user.image || '',
+        account_tier: user.account_tier || 'Tier 1',
+        verificationStatus: user.verificationStatus,
+        balance: user.balance,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message || 'Failed to load profile' });
+  }
+});
+
+router.post('/profile', async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    const body = req.body || {};
+
+    if (body.fullname || body.name) {
+      const full = String(body.fullname || body.name || '').trim();
+      if (full) {
+        const parts = full.split(/\s+/);
+        user.first_name = parts[0] || user.first_name;
+        user.last_name = parts.slice(1).join(' ') || user.last_name || '';
+        user.name = full;
+      }
+    }
+    if (body.phone !== undefined) user.phone = String(body.phone || '').trim();
+    if (body.gender !== undefined) {
+      const g = String(body.gender || '').trim();
+      user.gender = ['Female', 'Male', 'Others', ''].includes(g) ? g : (g || '');
+    }
+    if (body.dob !== undefined) user.dob = String(body.dob || '').trim();
+    if (body.country !== undefined) user.country = String(body.country || '').trim();
+    if (body.marital_status !== undefined) user.marital_status = String(body.marital_status || '').trim();
+    if (body.home_address !== undefined) user.home_address = String(body.home_address || '').trim();
+    if (body.next_of_kin !== undefined) user.next_of_kin = String(body.next_of_kin || '').trim();
+
+    await user.save();
+    return res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      user: {
+        _id: user._id,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        name: user.name,
+        username: user.username,
+        email: user.email,
+        phone: user.phone,
+        gender: user.gender,
+        country: user.country,
+        dob: user.dob,
+        marital_status: user.marital_status,
+        home_address: user.home_address,
+        next_of_kin: user.next_of_kin,
+        account_no: user.account_no,
+        image: user.image,
+        account_tier: user.account_tier,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message || 'Update failed' });
+  }
+});
+
+router.post('/profile/photo', async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    let fileBuffer = null;
+    if (req.files && req.files.profilePic) {
+      const f = req.files.profilePic;
+      fileBuffer = f.data || f.buffer;
+    } else if (req.file && req.file.buffer) {
+      fileBuffer = req.file.buffer;
+    } else if (req.body && req.body.imageBase64) {
+      const raw = String(req.body.imageBase64).replace(/^data:image\/\w+;base64,/, '');
+      fileBuffer = Buffer.from(raw, 'base64');
+    }
+
+    if (!fileBuffer) {
+      return res.status(400).json({ success: false, message: 'No image uploaded' });
+    }
+
+    const result = await uploadToCloudinary(fileBuffer, 'swiftpurse/profile');
+    user.image = result.secure_url || result.url || '';
+    await user.save();
+
+    return res.json({
+      success: true,
+      message: 'Profile picture updated successfully',
+      image: user.image,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message || 'Photo upload failed' });
+  }
+});
+
 module.exports = router;

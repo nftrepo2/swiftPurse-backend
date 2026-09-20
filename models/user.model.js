@@ -78,6 +78,10 @@ const userSchema = new mongoose.Schema(
 
     // Profile image & misc
     image: { type: String, default: '' },
+    dob: { type: String, default: '' },
+    marital_status: { type: String, default: '' },
+    home_address: { type: String, default: '' },
+    next_of_kin: { type: String, default: '' },
     resetPasswordToken: { type: String, select: false },
     resetPasswordExpires: { type: Date, select: false },
     pushSubscription: { type: mongoose.Schema.Types.Mixed, default: null },
