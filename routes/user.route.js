@@ -216,7 +216,44 @@ router.get('/dashboard/notification', NotificationController.list);
 router.get('/dashboard', async (req, res) => {
   try {
     const unreadCount = await Notification.countDocuments({ user_id: req.user._id, read_at: null });
-    const transactions = await Transaction.find({ user_id: req.user._id }).sort({ createdAt: -1 }).limit(20).lean();
+    let transactions = await Transaction.find({ user_id: req.user._id }).sort({ createdAt: -1 }).limit(30).lean();
+    // Backfill approved loans as credit rows when no matching Loan Disbursement transaction exists
+    try {
+      const Loan = require('../models/Loan');
+      const loans = await Loan.find({
+        user_id: req.user._id,
+        status: { $in: ['active', 'repaying', 'completed'] },
+        approved_at: { $ne: null },
+      }).sort({ approved_at: -1 }).limit(20).lean();
+      const existingLoanIds = new Set(
+        transactions
+          .map((t) => (t.meta && t.meta.loan_id ? String(t.meta.loan_id) : ''))
+          .filter(Boolean)
+      );
+      const alsoByTitle = transactions.filter((t) => /loan\s*disburse/i.test(String(t.title || '')));
+      loans.forEach((loan) => {
+        const lid = String(loan._id);
+        if (existingLoanIds.has(lid)) return;
+        const amt = Number(loan.approved_amount || loan.amount || 0);
+        if (!amt) return;
+        transactions.push({
+          _id: 'loan-' + lid,
+          user_id: req.user._id,
+          type: 'credit',
+          title: 'Loan Disbursement',
+          amount: amt,
+          currency: '$',
+          status: 'Successful',
+          description: 'Loan approved and disbursed',
+          meta: { loan_id: lid, source: 'loan-approve' },
+          createdAt: loan.approved_at || loan.createdAt,
+        });
+      });
+      transactions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      transactions = transactions.slice(0, 20);
+    } catch (loanErr) {
+      console.error('dashboard loan merge:', loanErr.message);
+    }
     return res.json({
       success: true,
       message: 'Dashboard endpoint',
@@ -643,10 +680,11 @@ router.get('/statements', async (req, res) => {
       const meta = t.meta || {};
       if (meta.transfer_id && transferIds.has(String(meta.transfer_id))) return; // skip mirror
       const isDebit = t.type === 'transfer' || t.type === 'debit' || t.type === 'withdrawal';
+      const title = t.title || (isDebit ? 'Bank Transfer' : 'INWARD TRANSFER');
       items.push({
         id: String(t._id),
         source: 'transaction',
-        title: t.title || (isDebit ? 'Bank Transfer' : 'INWARD TRANSFER'),
+        title,
         type: t.type || 'credit',
         amount: Number(t.amount || 0),
         currency: t.currency || 'USD',
@@ -657,10 +695,59 @@ router.get('/statements', async (req, res) => {
         account_no: meta.account_no || '',
         country: meta.country || '',
         transaction_id: meta.transaction_id || meta.txId || String(t._id),
-        payment_method: meta.payment_method || (isDebit ? 'Bank Transfer' : 'Inward Transfer'),
+        payment_method: meta.payment_method || (isDebit ? 'Bank Transfer' : (/loan/i.test(title) ? 'Loan Disbursement' : 'Inward Transfer')),
         is_debit: isDebit,
+        description: t.description || '',
       });
     });
+
+    // Backfill approved loans missing a Loan Disbursement transaction
+    try {
+      const Loan = require('../models/Loan');
+      const loans = await Loan.find({
+        user_id: req.user._id,
+        status: { $in: ['active', 'repaying', 'completed'] },
+        approved_at: { $ne: null },
+      }).sort({ approved_at: -1 }).limit(50).lean();
+      const existingLoanIds = new Set(
+        items.filter((x) => x.meta && x.meta.loan_id).map((x) => String(x.meta.loan_id)).concat(
+          items.filter((x) => /loan\s*disburse/i.test(String(x.title || ''))).map((x) => String(x.id))
+        )
+      );
+      // also detect meta on original txs
+      txs.forEach((t) => {
+        if (t.meta && t.meta.loan_id) existingLoanIds.add(String(t.meta.loan_id));
+      });
+      loans.forEach((loan) => {
+        const lid = String(loan._id);
+        if (existingLoanIds.has(lid)) return;
+        const already = items.some((it) => it.meta && String(it.meta.loan_id) === lid);
+        if (already) return;
+        const amt = Number(loan.approved_amount || loan.amount || 0);
+        if (!amt) return;
+        items.push({
+          id: 'loan-' + lid,
+          source: 'loan',
+          title: 'Loan Disbursement',
+          type: 'credit',
+          amount: amt,
+          currency: 'USD',
+          status: 'Successful',
+          createdAt: loan.approved_at || loan.createdAt,
+          bank: '',
+          holder_name: '',
+          account_no: '',
+          country: '',
+          transaction_id: 'LN' + lid.slice(-8).toUpperCase(),
+          payment_method: 'Loan Disbursement',
+          is_debit: false,
+          description: 'Loan approved and disbursed',
+          meta: { loan_id: lid },
+        });
+      });
+    } catch (loanErr) {
+      console.error('statements loan merge:', loanErr.message);
+    }
 
     items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     return res.json({ success: true, statements: items });
