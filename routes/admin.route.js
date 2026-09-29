@@ -16,6 +16,153 @@ const { sendPushToUser } = require('../utils/pushNotifications');
 
 const frontendUrl = () => String(process.env.FRONTEND_URL || '').replace(/\/$/, '');
 
+
+const BIRD_API_KEY = process.env.BIRD_API_KEY || '';
+const FROM_EMAIL = process.env.FROM_EMAIL || 'support@swiftpursebank.com';
+const FROM_NAME = process.env.FROM_NAME || 'SwiftPurse Bank';
+
+function birdBaseUrl() {
+  const key = String(BIRD_API_KEY || '');
+  if (key.includes('_us1_') || key.startsWith('bk_eu1')) return 'https://us1.platform.bird.com';
+  return 'https://us1.platform.bird.com';
+}
+
+async function sendMail(to, subject, html) {
+  if (!BIRD_API_KEY) {
+    console.warn('BIRD_API_KEY not set – email not sent. Subject:', subject, 'To:', to);
+    return { id: 'dev-skip' };
+  }
+  const fromEmail = String(FROM_EMAIL || '').trim();
+  const payload = {
+    from: { email: fromEmail, name: FROM_NAME },
+    to: [String(to).trim()],
+    subject: String(subject || ''),
+    html: String(html || ''),
+    category: 'transactional',
+  };
+  const url = birdBaseUrl() + '/v1/email/messages';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer ' + BIRD_API_KEY,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (_) { data = { raw: text }; }
+  if (!res.ok) {
+    const msg = (data && (data.message || data.error || data.detail)) || text || res.statusText;
+    console.error('Bird email failed:', res.status, msg);
+    const err = new Error(typeof msg === 'string' ? msg : 'Bird email send failed');
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data || { id: 'bird-ok' };
+}
+
+function escapeHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function messageToHtml(message) {
+  return escapeHtml(message).replace(/\n/g, '<br>');
+}
+
+function emailTemplateClassic(message, recipientName) {
+  const body = messageToHtml(message);
+  const name = escapeHtml(recipientName || 'there');
+  return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#eff1ff;font-family:Arial,Helvetica,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#eff1ff;padding:24px 12px">
+<tr><td align="center">
+<table width="590" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06)">
+<tr><td style="padding:28px 24px;text-align:center;background:#eff1ff">
+<img src="https://swiftpursebank.com/i/logo.png" alt="SwiftPurse Bank" width="180" style="display:block;margin:0 auto">
+</td></tr>
+<tr><td style="padding:28px 30px">
+<p style="font-size:18px;margin:0 0 16px;color:#111">Hi ${name},</p>
+<div style="font-size:16px;line-height:1.6;color:#333">${body}</div>
+<p style="font-size:16px;margin:28px 0 0;color:#333">Love,<br><br>The SwiftPurse Bank Team</p>
+</td></tr>
+<tr><td style="padding:20px 30px;border-top:1px solid #e3e3e3;color:#979797;font-size:12px;line-height:1.5">
+<p style="margin:0 0 8px">2026 SwiftPurse Bank. All rights reserved.</p>
+<p style="margin:0">UK banking services offered by SwiftPurse Bank (RC796975) with registered address at Head office: 21 Lombard St, City of London, London EC3V 9AH, UK.</p>
+<p style="margin:12px 0 0"><a href="https://swiftpursebank.com" style="color:#4f46e5;text-decoration:none">swiftpursebank.com</a> · <a href="mailto:support@swiftpursebank.com" style="color:#4f46e5;text-decoration:none">support@swiftpursebank.com</a></p>
+</td></tr>
+</table>
+</td></tr></table></body></html>`;
+}
+
+function emailTemplateModern(message, recipientName) {
+  const body = messageToHtml(message);
+  const name = escapeHtml(recipientName || 'there');
+  return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#0f172a;font-family:Arial,Helvetica,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#0f172a;padding:32px 12px">
+<tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden">
+<tr><td style="background:linear-gradient(135deg,#4f46e5 0%,#7c3aed 100%);padding:32px 28px;text-align:center">
+<img src="https://swiftpursebank.com/i/logo.png" alt="SwiftPurse Bank" width="160" style="display:block;margin:0 auto;filter:brightness(0) invert(1)">
+<p style="margin:16px 0 0;color:rgba(255,255,255,0.9);font-size:13px;letter-spacing:1px;text-transform:uppercase">Secure Banking</p>
+</td></tr>
+<tr><td style="padding:36px 32px">
+<p style="font-size:22px;font-weight:700;margin:0 0 8px;color:#0f172a">Hello ${name},</p>
+<p style="font-size:14px;color:#64748b;margin:0 0 24px">A message from SwiftPurse Bank</p>
+<div style="font-size:16px;line-height:1.7;color:#334155;padding:20px;background:#f8fafc;border-radius:12px;border-left:4px solid #4f46e5">${body}</div>
+<p style="font-size:15px;margin:28px 0 0;color:#334155">Warm regards,<br><strong>The SwiftPurse Bank Team</strong></p>
+</td></tr>
+<tr><td style="padding:24px 32px;background:#f1f5f9;color:#64748b;font-size:12px;line-height:1.6">
+<p style="margin:0 0 6px">© 2026 SwiftPurse Bank. All rights reserved.</p>
+<p style="margin:0">21 Lombard St, City of London, London EC3V 9AH, UK · RC796975</p>
+<p style="margin:10px 0 0"><a href="https://swiftpursebank.com" style="color:#4f46e5;text-decoration:none">Visit website</a> · <a href="mailto:support@swiftpursebank.com" style="color:#4f46e5;text-decoration:none">Contact support</a></p>
+</td></tr>
+</table>
+</td></tr></table></body></html>`;
+}
+
+function emailTemplateElegant(message, recipientName) {
+  const body = messageToHtml(message);
+  const name = escapeHtml(recipientName || 'there');
+  return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#faf7f2;font-family:Georgia,'Times New Roman',serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#faf7f2;padding:28px 12px">
+<tr><td align="center">
+<table width="580" cellpadding="0" cellspacing="0" style="background:#ffffff;border:1px solid #e8e0d4;border-radius:4px;overflow:hidden">
+<tr><td style="padding:36px 36px 20px;text-align:center;border-bottom:2px solid #c9a84c">
+<img src="https://swiftpursebank.com/i/logo.png" alt="SwiftPurse Bank" width="170" style="display:block;margin:0 auto">
+<p style="margin:14px 0 0;font-size:11px;letter-spacing:3px;color:#c9a84c;text-transform:uppercase">Private Client Correspondence</p>
+</td></tr>
+<tr><td style="padding:36px">
+<p style="font-size:17px;margin:0 0 20px;color:#1a1a1a">Dear ${name},</p>
+<div style="font-size:15px;line-height:1.75;color:#3a3a3a">${body}</div>
+<p style="font-size:15px;margin:32px 0 0;color:#1a1a1a">Yours sincerely,<br><br>
+<span style="font-style:italic">The SwiftPurse Bank Team</span><br>
+<span style="font-size:12px;color:#888">Client Relations</span>
+</p>
+</td></tr>
+<tr><td style="padding:20px 36px;background:#1a1a1a;color:#c9a84c;font-size:11px;line-height:1.6;text-align:center">
+<p style="margin:0 0 6px">SwiftPurse Bank · RC796975</p>
+<p style="margin:0;color:#999">21 Lombard St, City of London, London EC3V 9AH, UK</p>
+<p style="margin:10px 0 0"><a href="https://swiftpursebank.com" style="color:#c9a84c;text-decoration:none">swiftpursebank.com</a> &nbsp;|&nbsp; <a href="mailto:support@swiftpursebank.com" style="color:#c9a84c;text-decoration:none">support@swiftpursebank.com</a></p>
+</td></tr>
+</table>
+</td></tr></table></body></html>`;
+}
+
+function buildEmailHtml(template, message, recipientName) {
+  const t = String(template || 'classic').toLowerCase();
+  if (t === 'modern') return emailTemplateModern(message, recipientName);
+  if (t === 'elegant') return emailTemplateElegant(message, recipientName);
+  return emailTemplateClassic(message, recipientName);
+}
+
+
 function safeUser(u) {
   return {
     _id: u._id,
@@ -1245,5 +1392,58 @@ router.delete('/wallets/:id', async (req, res) => {
     return res.status(500).json({ success: false, message: e.message });
   }
 });
+
+
+// POST send email to user(s) with selected template
+router.post('/send-email', async (req, res) => {
+  try {
+    const { subject, message, userIds, all, template } = req.body || {};
+    if (!subject || !message) {
+      return res.status(400).json({ success: false, message: 'Subject and message are required' });
+    }
+    let users = [];
+    if (all) {
+      users = await User.find({ role: { $ne: 'ADMIN' } });
+    } else {
+      const ids = Array.isArray(userIds) ? userIds : userIds ? [userIds] : [];
+      if (!ids.length) return res.status(400).json({ success: false, message: 'Select at least one user' });
+      users = await User.find({ _id: { $in: ids } });
+    }
+    if (!users.length) return res.status(404).json({ success: false, message: 'No users found' });
+
+    let sent = 0;
+    const errors = [];
+    for (const user of users) {
+      if (!user.email) {
+        errors.push({ id: user._id, error: 'No email' });
+        continue;
+      }
+      const name = user.name || [user.first_name, user.last_name].filter(Boolean).join(' ') || user.username || 'there';
+      const html = buildEmailHtml(template, message, name);
+      try {
+        await sendMail(user.email, String(subject), html);
+        sent += 1;
+      } catch (e) {
+        console.error('Send email failed for', user.email, e.message);
+        errors.push({ id: user._id, email: user.email, error: e.message });
+      }
+    }
+
+    if (sent === 0) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send any emails',
+        errors,
+      });
+    }
+
+    const msg = sent > 1 ? `Emails sent to ${sent} users` : 'Email sent successfully';
+    return res.json({ success: true, message: msg, count: sent, errors: errors.length ? errors : undefined });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message || 'Send email failed' });
+  }
+});
+
 
 module.exports = router;
