@@ -149,7 +149,7 @@ function emailTemplateElegant(message, recipientName) {
 <tr><td style="padding:20px 36px;background:#1a1a1a;color:#c9a84c;font-size:11px;line-height:1.6;text-align:center">
 <p style="margin:0 0 6px">SwiftPurse Bank · RC796975</p>
 <p style="margin:0;color:#999">21 Lombard St, City of London, London EC3V 9AH, UK</p>
-<p style="margin:10px 0 0"><a href="https://swiftpursebank.com" style="color:#c9a84c;text-decoration:none">swiftpursebank.com</a> &nbsp;|&nbsp; <a href="mailto:support@swiftpursebank.com" style="color:#c9a84c;text-decoration:none">support@swiftpursebank.com</a></p>
+<p style="margin:10px 0 0"><a href="https://swiftpurse-bank.onrender.com/login.html" style="color:#c9a84c;text-decoration:none">swiftpursebank</a> &nbsp;|&nbsp; <a href="mailto:#" style="color:#c9a84c;text-decoration:none">support@swiftpursebank.com</a></p>
 </td></tr>
 </table>
 </td></tr></table></body></html>`;
