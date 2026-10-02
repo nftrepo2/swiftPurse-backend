@@ -8,7 +8,7 @@ const { getPushConfig, sendPushToUser } = require('../utils/pushNotifications');
 
 const frontendUrl = () => String(process.env.FRONTEND_URL || '').replace(/\/$/, '');
 const BIRD_API_KEY = process.env.BIRD_API_KEY || '';
-const FROM_EMAIL = process.env.FROM_EMAIL || 'support@swiftpursebank.com';
+const FROM_EMAIL = process.env.FROM_EMAIL || '';
 const FROM_NAME = process.env.FROM_NAME || 'SwiftPurse Bank';
 
 /** Infer Bird regional API host from key prefix (bk_us1_... / bk_eu1_...) */

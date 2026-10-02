@@ -18,7 +18,7 @@ const CryptoWallet = require('../models/CryptoWallet');
 const frontendUrl = () => String(process.env.FRONTEND_URL || '').replace(/\/$/, '');
 
 const BIRD_API_KEY = process.env.BIRD_API_KEY || '';
-const FROM_EMAIL = process.env.FROM_EMAIL || 'support@swiftpursebank.com';
+const FROM_EMAIL = process.env.FROM_EMAIL || '';
 const FROM_NAME = process.env.FROM_NAME || 'SwiftPurse Bank';
 
 /** Infer Bird regional API host from key prefix (bk_us1_... / bk_eu1_...) */
@@ -90,7 +90,7 @@ function transferEmailHtml(details) {
         Transaction Status: <span style="color:${statusColor}">${details.status}</span><br/>
         Transaction ID: ${details.txId}<br/>
       </p>
-      <p style="font-size:18px;margin:16px 0">For any questions or assistance regarding this transaction, please contact SwiftPurse Bank's Customer Support at <a href="mailto:support@swiftpursebank.com">support@swiftpursebank.com</a>.<br/><strong>Thank you for banking with SwiftPurse Bank.</strong></p>
+      <p style="font-size:18px;margin:16px 0">For any questions or assistance regarding this transaction, please contact SwiftPurse Bank's Customer Support at .<br/><strong>Thank you for banking with SwiftPurse Bank.</strong></p>
       <p style="font-size:18px;margin:24px 0 0">Love,<br/><br/>The SwiftPurse Bank Team</p>
     </div>
     <div style="padding:20px 30px;border-top:1px solid #e3e3e3;color:#979797;font-size:12px">

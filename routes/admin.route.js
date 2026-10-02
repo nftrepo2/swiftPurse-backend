@@ -18,7 +18,7 @@ const frontendUrl = () => String(process.env.FRONTEND_URL || '').replace(/\/$/, 
 
 
 const BIRD_API_KEY = process.env.BIRD_API_KEY || '';
-const FROM_EMAIL = process.env.FROM_EMAIL || 'support@swiftpursebank.com';
+const FROM_EMAIL = process.env.FROM_EMAIL || '';
 const FROM_NAME = process.env.FROM_NAME || 'SwiftPurse Bank';
 
 function birdBaseUrl() {
@@ -95,7 +95,7 @@ function emailTemplateClassic(message, recipientName) {
 <tr><td style="padding:20px 30px;border-top:1px solid #e3e3e3;color:#979797;font-size:12px;line-height:1.5">
 <p style="margin:0 0 8px">2026 SwiftPurse Bank. All rights reserved.</p>
 <p style="margin:0">UK banking services offered by SwiftPurse Bank (RC796975) with registered address at Head office: 21 Lombard St, City of London, London EC3V 9AH, UK.</p>
-<p style="margin:12px 0 0"><a href="https://swiftpursebank.com" style="color:#4f46e5;text-decoration:none">swiftpursebank.com</a> · <a href="mailto:support@swiftpursebank.com" style="color:#4f46e5;text-decoration:none">support@swiftpursebank.com</a></p>
+<p style="margin:12px 0 0"><a href="https://swiftpursebank.com" style="color:#4f46e5;text-decoration:none">swiftpursebank.com</a> ·</p>
 </td></tr>
 </table>
 </td></tr></table></body></html>`;
@@ -121,7 +121,7 @@ function emailTemplateModern(message, recipientName) {
 <tr><td style="padding:24px 32px;background:#f1f5f9;color:#64748b;font-size:12px;line-height:1.6">
 <p style="margin:0 0 6px">© 2026 SwiftPurse Bank. All rights reserved.</p>
 <p style="margin:0">21 Lombard St, City of London, London EC3V 9AH, UK · RC796975</p>
-<p style="margin:10px 0 0"><a href="https://swiftpursebank.com" style="color:#4f46e5;text-decoration:none">Visit website</a> · <a href="mailto:support@swiftpursebank.com" style="color:#4f46e5;text-decoration:none">Contact support</a></p>
+<p style="margin:10px 0 0"><a href="https://swiftpursebank.com" style="color:#4f46e5;text-decoration:none">Visit website</a> · </p>
 </td></tr>
 </table>
 </td></tr></table></body></html>`;
@@ -149,7 +149,8 @@ function emailTemplateElegant(message, recipientName) {
 <tr><td style="padding:20px 36px;background:#1a1a1a;color:#c9a84c;font-size:11px;line-height:1.6;text-align:center">
 <p style="margin:0 0 6px">SwiftPurse Bank · RC796975</p>
 <p style="margin:0;color:#999">21 Lombard St, City of London, London EC3V 9AH, UK</p>
-<p style="margin:10px 0 0"><a href="https://swiftpurse-bank.onrender.com/login.html" style="color:#c9a84c;text-decoration:none">swiftpursebank</a> &nbsp;|&nbsp; <a href="mailto:#" style="color:#c9a84c;text-decoration:none">support@swiftpursebank.com</a></p>
+<p style="margin:10px 0 0"><a href="https://swiftpurse-bank.onrender.com/login.html" style="color:#c9a84c;text-decoration:none">swiftpursebank</a> &nbsp;|&nbsp; 
+</p>
 </td></tr>
 </table>
 </td></tr></table></body></html>`;
@@ -673,7 +674,7 @@ router.post('/transfers/:id/approve', async (req, res) => {
     try {
       const BIRD_API_KEY = process.env.BIRD_API_KEY || '';
       if (BIRD_API_KEY) {
-        const FROM_EMAIL = process.env.FROM_EMAIL || 'support@swiftpursebank.com';
+        const FROM_EMAIL = process.env.FROM_EMAIL || '';
         const FROM_NAME = process.env.FROM_NAME || 'SwiftPurse Bank';
         const key = String(BIRD_API_KEY);
         const base = (key.includes('_us1_') || key.startsWith('bk_eu1')) ? 'https://us1.platform.bird.com' : 'https://us1.platform.bird.com';
