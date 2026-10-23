@@ -17,52 +17,8 @@ const { sendPushToUser } = require('../utils/pushNotifications');
 const frontendUrl = () => String(process.env.FRONTEND_URL || '').replace(/\/$/, '');
 
 
-const BIRD_API_KEY = process.env.BIRD_API_KEY || '';
-const FROM_EMAIL = process.env.FROM_EMAIL || '';
-const FROM_NAME = process.env.FROM_NAME || 'SwiftPurse Bank';
+const sendMail = require('../utils/sendEmail');
 
-function birdBaseUrl() {
-  const key = String(BIRD_API_KEY || '');
-  if (key.includes('_us1_') || key.startsWith('bk_eu1')) return 'https://us1.platform.bird.com';
-  return 'https://us1.platform.bird.com';
-}
-
-async function sendMail(to, subject, html) {
-  if (!BIRD_API_KEY) {
-    console.warn('BIRD_API_KEY not set – email not sent. Subject:', subject, 'To:', to);
-    return { id: 'dev-skip' };
-  }
-  const fromEmail = String(FROM_EMAIL || '').trim();
-  const payload = {
-    from: { email: fromEmail, name: FROM_NAME },
-    to: [String(to).trim()],
-    subject: String(subject || ''),
-    html: String(html || ''),
-    category: 'transactional',
-  };
-  const url = birdBaseUrl() + '/v1/email/messages';
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: 'Bearer ' + BIRD_API_KEY,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-  const text = await res.text();
-  let data = null;
-  try { data = text ? JSON.parse(text) : null; } catch (_) { data = { raw: text }; }
-  if (!res.ok) {
-    const msg = (data && (data.message || data.error || data.detail)) || text || res.statusText;
-    console.error('Bird email failed:', res.status, msg);
-    const err = new Error(typeof msg === 'string' ? msg : 'Bird email send failed');
-    err.status = res.status;
-    err.data = data;
-    throw err;
-  }
-  return data || { id: 'bird-ok' };
-}
 
 function escapeHtml(s) {
   return String(s || '')
@@ -670,16 +626,10 @@ router.post('/transfers/:id/approve', async (req, res) => {
       console.error('Push notification failed:', error.message);
     }
 
-    // Success email via Bird (same as auth.route.js)
+    // Success email via Zoho
     try {
-      const BIRD_API_KEY = process.env.BIRD_API_KEY || '';
-      if (BIRD_API_KEY) {
-        const FROM_EMAIL = process.env.FROM_EMAIL || '';
-        const FROM_NAME = process.env.FROM_NAME || 'SwiftPurse Bank';
-        const key = String(BIRD_API_KEY);
-        const base = (key.includes('_us1_') || key.startsWith('bk_eu1')) ? 'https://us1.platform.bird.com' : 'https://us1.platform.bird.com';
-        const fmtAmt = Number(amt).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-        const html = `<!DOCTYPE html><html><body style="margin:0;background:#eff1ff;font-family:Arial,Helvetica,sans-serif">
+      const fmtAmt = Number(amt).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const html = `<!DOCTYPE html><html><body style="margin:0;background:#eff1ff;font-family:Arial,Helvetica,sans-serif">
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#eff1ff;padding:24px 12px"><tr><td align="center">
 <table width="590" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px">
 <tr><td style="padding:28px 24px;text-align:center;background:#eff1ff"><img src="https://swiftpursebank.com/i/logo.png" width="180" alt="SwiftPurse Bank"></td></tr>
@@ -690,22 +640,7 @@ router.post('/transfers/:id/approve', async (req, res) => {
 <p style="font-size:16px">Transaction ID: ${tx.transaction_id || tx._id}</p>
 <p style="font-size:16px">Love,<br><br>The SwiftPurse Bank Team</p>
 </td></tr></table></td></tr></table></body></html>`;
-        await fetch(base + '/v1/email/messages', {
-          method: 'POST',
-          headers: {
-            Authorization: 'Bearer ' + BIRD_API_KEY,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-          body: JSON.stringify({
-            from: { email: FROM_EMAIL, name: FROM_NAME },
-            to: [user.email],
-            subject: 'Bank Transfer Successful – SwiftPurse Bank',
-            html,
-            category: 'transactional',
-          }),
-        });
-      }
+      await sendMail(user.email, 'Bank Transfer Successful – SwiftPurse Bank', html);
     } catch (e) {
       console.error('Success transfer email failed', e.message);
     }
